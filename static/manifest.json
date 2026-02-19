@@ -1,0 +1,21 @@
+{
+  "name": "Chinese Learning",
+  "short_name": "中文学习",
+  "description": "Learn Chinese with stories and flashcards",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f5f5",
+  "theme_color": "#c0392b",
+  "icons": [
+    {
+      "src": "/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

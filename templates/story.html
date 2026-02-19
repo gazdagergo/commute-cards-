@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>{{ story[1] }} - Chinese Learning PWA</title>
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="中文学习">
+    <meta name="theme-color" content="#c0392b">
+    <link rel="manifest" href="/static/manifest.json">
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 600px; margin: 0 auto; }
+        .back { color: #c0392b; text-decoration: none; display: inline-block; margin-bottom: 16px; }
+        .back:hover { text-decoration: underline; }
+        h1 { color: #333; margin-bottom: 8px; }
+        .meta { color: #999; font-size: 0.85rem; margin-bottom: 16px; }
+
+        /* Swiper styles */
+        .swiper {
+            width: 100%;
+            max-width: 450px;
+            margin: 0 auto 16px auto;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .swiper-slide {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #e0e0e0;
+        }
+        .swiper-slide img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .swiper-slide .no-image {
+            padding: 60px 20px;
+            color: #999;
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        .swiper-pagination-bullet-active {
+            background: #c0392b !important;
+        }
+
+        /* Story text - inline with clickable sections */
+        .story-text {
+            background: #fff;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            font-size: 1.2rem;
+            line-height: 2;
+            margin-bottom: 16px;
+            max-height: 300px;
+            overflow-y: auto;
+            scroll-behavior: smooth;
+            white-space: pre-wrap;
+        }
+        .text-section {
+            cursor: pointer;
+            transition: color 0.2s;
+            white-space: pre-wrap;
+            -webkit-user-select: text;
+            user-select: text;
+        }
+        .text-section.active {
+            color: #000;
+        }
+        .text-section.inactive {
+            color: #999;
+        }
+
+        /* Page indicator */
+        .page-indicator {
+            text-align: center;
+            font-size: 0.9rem;
+            color: #666;
+            margin-bottom: 16px;
+        }
+
+        /* Practice mode styles */
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 16px;
+        }
+        .toggle-label {
+            font-size: 0.95rem;
+            color: #333;
+        }
+        .toggle {
+            position: relative;
+            width: 50px;
+            height: 28px;
+        }
+        .toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: #ccc;
+            border-radius: 28px;
+            transition: 0.3s;
+        }
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 22px;
+            width: 22px;
+            left: 3px;
+            bottom: 3px;
+            background: white;
+            border-radius: 50%;
+            transition: 0.3s;
+        }
+        .toggle input:checked + .toggle-slider {
+            background: #27ae60;
+        }
+        .toggle input:checked + .toggle-slider:before {
+            transform: translateX(22px);
+        }
+
+        .practice-section {
+            margin-top: 16px;
+        }
+        .opacity-slider {
+            width: 100%;
+            margin-bottom: 16px;
+            -webkit-appearance: none;
+            height: 8px;
+            border-radius: 4px;
+            background: #ddd;
+        }
+        .opacity-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #c0392b;
+            cursor: pointer;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 120px;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 1.2rem;
+            line-height: 1.8;
+            font-family: inherit;
+            resize: vertical;
+            background: #fff;
+        }
+        textarea:focus { outline: none; border-color: #c0392b; }
+
+        .check-btn {
+            background: #c0392b;
+            color: #fff;
+            border: none;
+            padding: 10px 20px;
+            font-size: 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            margin-top: 12px;
+        }
+        .check-btn:hover { background: #a93226; }
+
+        .result {
+            margin-top: 12px;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 0.95rem;
+        }
+        .result.success { background: #d4edda; color: #155724; }
+        .result.partial { background: #fff3cd; color: #856404; }
+
+        .flashcards-section {
+            margin-top: 24px;
+        }
+        .section-title {
+            font-size: 0.85rem;
+            color: #999;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .flashcard-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .flashcard-badge {
+            display: inline-block;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 20px;
+            padding: 8px 16px;
+            text-decoration: none;
+            font-size: 0.95rem;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        }
+        .flashcard-badge:hover {
+            border-color: #c0392b;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .badge-chinese {
+            color: #c0392b;
+            font-weight: 500;
+        }
+        .badge-english {
+            color: #666;
+            margin-left: 6px;
+        }
+        .flashcard-badge.add-new {
+            background: #27ae60;
+            border-color: #27ae60;
+            color: #fff;
+        }
+        .flashcard-badge.add-new:hover {
+            background: #229954;
+            border-color: #229954;
+        }
+
+        .admin-links {
+            margin-top: 24px;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .admin-link {
+            display: inline-block;
+            padding: 8px 16px;
+            background: #f0f0f0;
+            color: #666;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+        .admin-link:hover {
+            background: #e0e0e0;
+            color: #333;
+        }
+
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body>
+    <div class="container" x-data="storyApp()" x-init="init()">
+        <a href="/" class="back">&larr; Back to stories</a>
+        <h1>{{ story[1] }}</h1>
+        <p class="meta">{{ story[3].strftime('%Y-%m-%d %H:%M') }}</p>
+
+        <!-- Image Swiper -->
+        <template x-if="hasImages">
+            <div class="swiper" x-ref="swiperContainer">
+                <div class="swiper-wrapper">
+                    <template x-for="(slice, index) in slices" :key="slice.id">
+                        <div class="swiper-slide">
+                            <template x-if="slice.image_url">
+                                <img :src="slice.image_url" alt="Slice illustration">
+                            </template>
+                            <template x-if="!slice.image_url">
+                                <div class="no-image">No image for this section</div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+                <div class="swiper-pagination" x-ref="swiperPagination"></div>
+            </div>
+        </template>
+
+        <!-- Page indicator -->
+        <div class="page-indicator" x-show="slices.length > 1">
+            <span x-text="currentIndex + 1"></span> / <span x-text="slices.length"></span>
+        </div>
+
+        <!-- Story text with clickable sections -->
+        <div class="story-text" x-ref="storyText" :style="practiceMode ? { opacity: 1 - (opacity / 100) } : {}"><template x-for="(slice, index) in slices" :key="slice.id"><span class="text-section" :class="index === currentIndex ? 'active' : 'inactive'" :data-index="index" @click="goToSlice(index)" x-text="slice.text"></span></template></div>
+
+        <!-- Practice mode toggle -->
+        <div class="toggle-row">
+            <label class="toggle">
+                <input type="checkbox" x-model="practiceMode" @change="if(practiceMode) { checked = false; }">
+                <span class="toggle-slider"></span>
+            </label>
+            <span class="toggle-label">Practice Writing</span>
+        </div>
+
+        <!-- Practice section -->
+        <div class="practice-section" x-show="practiceMode" x-cloak>
+            <input type="range" min="0" max="100" step="5" x-model.number="opacity" class="opacity-slider">
+            <textarea
+                x-model="input"
+                placeholder="Try to write the text from memory..."
+                @input="checked = false"
+            ></textarea>
+            <button class="check-btn" @click="checked = true">Check</button>
+
+            <div x-show="checked && isMatch" class="result success">
+                Perfect match!
+            </div>
+            <div x-show="checked && !isMatch" class="result partial">
+                <span x-text="similarity + '%'"></span> matching. Keep practicing!
+            </div>
+        </div>
+
+        <!-- Flashcards for current slice -->
+        <div class="flashcards-section">
+            <div class="section-title">Vocabulary</div>
+            <div class="flashcard-badges">
+                <template x-for="card in currentFlashcards" :key="card.id">
+                    <a :href="'/flashcards/' + card.id + '?from_story={{ story[0] }}&slice=' + (currentIndex + 1)" class="flashcard-badge">
+                        <span class="badge-chinese" x-text="card.chinese"></span>
+                        <span class="badge-english" x-text="card.english"></span>
+                    </a>
+                </template>
+                <a :href="'/flashcards/add?slice_id=' + currentSlice.id + '&story_id={{ story[0] }}'" class="flashcard-badge add-new">+ New</a>
+            </div>
+        </div>
+
+        <!-- Admin links -->
+        <div class="admin-links">
+            <a :href="'/story/{{ story[0] }}/slice/' + (currentIndex + 1) + '/edit'" class="admin-link">Edit Slice</a>
+            <a href="{{ url_for('slice_add', story_id=story[0]) }}" class="admin-link">+ Add Slice</a>
+        </div>
+    </div>
+
+    <script>
+        function storyApp() {
+            return {
+                slices: {{ slices_data | tojson }},
+                currentIndex: {{ initial_slice_num - 1 }},
+                storyId: {{ story[0] }},
+                swiper: null,
+                practiceMode: false,
+                opacity: 100,
+                input: '',
+                checked: false,
+
+                get currentSlice() {
+                    return this.slices[this.currentIndex] || {};
+                },
+
+                get currentFlashcards() {
+                    return this.currentSlice.flashcards || [];
+                },
+
+                get hasImages() {
+                    return this.slices.some(s => s.image_url);
+                },
+
+                get original() {
+                    return this.currentSlice.text || '';
+                },
+
+                get isMatch() {
+                    return this.input.trim() === this.original.trim();
+                },
+
+                get similarity() {
+                    const a = this.input.trim();
+                    const b = this.original.trim();
+                    if (!a) return 0;
+                    let matches = 0;
+                    for (let i = 0; i < Math.min(a.length, b.length); i++) {
+                        if (a[i] === b[i]) matches++;
+                    }
+                    return Math.round((matches / b.length) * 100);
+                },
+
+                init() {
+                    // Initialize Swiper after Alpine has rendered
+                    this.$nextTick(() => {
+                        if (this.hasImages) {
+                            this.initSwiper();
+                        }
+                    });
+
+                    // Handle browser back/forward
+                    window.addEventListener('popstate', (e) => {
+                        if (e.state && typeof e.state.sliceIndex === 'number') {
+                            this.currentIndex = e.state.sliceIndex;
+                            if (this.swiper) {
+                                this.swiper.slideTo(this.currentIndex, 300);
+                            }
+                        }
+                    });
+
+                    // Set initial history state
+                    history.replaceState(
+                        { sliceIndex: this.currentIndex },
+                        '',
+                        this.getSliceUrl(this.currentIndex)
+                    );
+                },
+
+                initSwiper() {
+                    const container = this.$refs.swiperContainer;
+                    const pagination = this.$refs.swiperPagination;
+                    if (!container) return;
+
+                    // Store reference to Alpine component for callback
+                    const self = this;
+
+                    this.swiper = new Swiper(container, {
+                        initialSlide: this.currentIndex,
+                        spaceBetween: 10,
+                        pagination: {
+                            el: pagination,
+                            clickable: true
+                        },
+                        on: {
+                            slideChangeTransitionEnd: function() {
+                                self.onSwiperSlideChange(this.activeIndex);
+                            }
+                        }
+                    });
+                },
+
+                onSwiperSlideChange(index) {
+                    if (index === this.currentIndex) return;
+
+                    this.currentIndex = index;
+
+                    // Update URL
+                    const url = this.getSliceUrl(index);
+                    history.pushState({ sliceIndex: index }, '', url);
+
+                    // Reset practice mode
+                    this.input = '';
+                    this.checked = false;
+
+                    // Scroll text section into view within container
+                    this.scrollToActiveSection();
+                },
+
+                goToSlice(index, updateSwiper = true) {
+                    if (index < 0 || index >= this.slices.length) return;
+                    if (index === this.currentIndex) return;
+
+                    this.currentIndex = index;
+
+                    // Update swiper if needed
+                    if (updateSwiper && this.swiper) {
+                        this.swiper.slideTo(index, 300);
+                    }
+
+                    // Update URL
+                    const url = this.getSliceUrl(index);
+                    history.pushState({ sliceIndex: index }, '', url);
+
+                    // Reset practice mode
+                    this.input = '';
+                    this.checked = false;
+
+                    // Scroll text section into view within container
+                    this.scrollToActiveSection();
+                },
+
+                scrollToActiveSection() {
+                    this.$nextTick(() => {
+                        const container = this.$refs.storyText;
+                        const activeSection = container?.querySelector('.text-section.active');
+                        if (container && activeSection) {
+                            // Calculate scroll position to center the active section
+                            const containerRect = container.getBoundingClientRect();
+                            const sectionRect = activeSection.getBoundingClientRect();
+                            const scrollTop = activeSection.offsetTop - container.offsetTop - (containerRect.height / 2) + (sectionRect.height / 2);
+                            container.scrollTo({ top: Math.max(0, scrollTop), behavior: 'smooth' });
+                        }
+                    });
+                },
+
+                getSliceUrl(index) {
+                    const sliceNum = index + 1;
+                    if (sliceNum === 1) {
+                        return `/story/${this.storyId}`;
+                    }
+                    return `/story/${this.storyId}/slice/${sliceNum}`;
+                }
+            };
+        }
+    </script>
+</body>
+</html>
