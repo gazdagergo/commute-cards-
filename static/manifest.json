@@ -1,11 +1,11 @@
 {
-  "name": "Chinese Learning",
-  "short_name": "中文学习",
-  "description": "Learn Chinese with stories and flashcards",
+  "name": "Soziologie Lernen",
+  "short_name": "Soziologie",
+  "description": "Micro-learning companion for sociology course",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f5f5f5",
-  "theme_color": "#c0392b",
+  "background_color": "#f3f4f6",
+  "theme_color": "#4f46e5",
   "icons": [
     {
       "src": "/static/icon-192.png",

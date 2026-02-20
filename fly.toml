@@ -1,9 +1,9 @@
-# fly.toml app configuration file generated for chinese-learning-pwa on 2026-02-01T10:30:12+01:00
+# fly.toml app configuration file for sociology-learning-pwa
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'chinese-learning-pwa'
+app = 'sociology-learning-pwa'
 primary_region = 'fra'
 
 [build]

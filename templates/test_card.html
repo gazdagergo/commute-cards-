@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Card Test Harness - Soziologie</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen p-4">
+    <div class="max-w-lg mx-auto">
+        <header class="mb-6">
+            <h1 class="text-xl font-bold text-gray-800">Card Test Harness</h1>
+            <p class="text-gray-600 text-sm">Paste card HTML below to test before inserting into database</p>
+        </header>
+
+        <!-- Card HTML input -->
+        <div class="mb-6">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Card HTML</label>
+            <textarea id="card-html-input"
+                      class="w-full h-64 p-3 font-mono text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                      placeholder='<div x-data="cardResponse()" class="p-4">...</div>'></textarea>
+            <button onclick="renderCard()"
+                    class="mt-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm">
+                Render Card
+            </button>
+            <button onclick="clearCard()"
+                    class="mt-2 ml-2 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg text-sm">
+                Clear
+            </button>
+        </div>
+
+        <!-- Rendered card preview -->
+        <div class="mb-6">
+            <h2 class="text-sm font-medium text-gray-700 mb-2">Preview</h2>
+            <div class="bg-white rounded-xl shadow-sm overflow-hidden min-h-[200px]">
+                <div id="card-preview"></div>
+            </div>
+        </div>
+
+        <!-- Console output -->
+        <div>
+            <h2 class="text-sm font-medium text-gray-700 mb-2">Console Output</h2>
+            <div id="console-output"
+                 class="bg-gray-900 text-green-400 p-4 rounded-lg font-mono text-sm min-h-[100px] max-h-[300px] overflow-auto">
+                Ready for testing...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Mock cardResponse for testing - logs to console output div instead of submitting
+        function cardResponse() {
+            return {
+                submitting: false,
+                submitted: false,
+                error: null,
+
+                async submitResponse(data) {
+                    this.submitting = true;
+                    logToConsole('submitResponse called with:', JSON.stringify(data, null, 2));
+
+                    // Simulate network delay
+                    await new Promise(resolve => setTimeout(resolve, 500));
+
+                    this.submitting = false;
+                    this.submitted = true;
+                    logToConsole('Response would be submitted. Card would transition to next.');
+                }
+            };
+        }
+
+        function logToConsole(message, data = '') {
+            const output = document.getElementById('console-output');
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'mb-2';
+            entry.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> ${message}`;
+            if (data) {
+                const pre = document.createElement('pre');
+                pre.className = 'text-yellow-400 ml-4 whitespace-pre-wrap';
+                pre.textContent = data;
+                entry.appendChild(pre);
+            }
+            output.appendChild(entry);
+            output.scrollTop = output.scrollHeight;
+        }
+
+        function renderCard() {
+            const html = document.getElementById('card-html-input').value;
+            const preview = document.getElementById('card-preview');
+
+            if (!html.trim()) {
+                logToConsole('Error: No HTML provided');
+                return;
+            }
+
+            preview.innerHTML = html;
+            logToConsole('Card rendered successfully');
+
+            // Re-initialize Alpine on the new content
+            if (window.Alpine) {
+                Alpine.initTree(preview);
+                logToConsole('Alpine.js initialized on card content');
+            }
+        }
+
+        function clearCard() {
+            document.getElementById('card-html-input').value = '';
+            document.getElementById('card-preview').innerHTML = '';
+            document.getElementById('console-output').innerHTML = 'Ready for testing...';
+        }
+
+        // Example card HTML for quick testing
+        const exampleCard = `<div x-data="cardResponse()" class="p-4">
+    <div x-data="{ answer: '' }">
+        <p class="text-gray-600 text-sm mb-2">Lernziel: Grundbegriff verstehen</p>
+        <h2 class="text-lg font-semibold mb-4">Was ist Soziologie?</h2>
+
+        <textarea x-model="answer"
+                  class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                  rows="4"
+                  placeholder="Deine Antwort..."></textarea>
+
+        <button @click="submitResponse({ answer })"
+                :disabled="submitting || answer.trim().length < 5"
+                class="mt-4 w-full py-3 bg-indigo-600 text-white rounded-lg font-medium disabled:opacity-50">
+            <span x-show="!submitting">Antwort senden</span>
+            <span x-show="submitting">Wird gesendet...</span>
+        </button>
+
+        <p x-show="error" x-text="error" class="text-red-600 mt-2 text-sm"></p>
+    </div>
+</div>`;
+
+        // Load example on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('card-html-input').value = exampleCard;
+            logToConsole('Example card HTML loaded. Click "Render Card" to preview.');
+        });
+    </script>
+</body>
+</html>

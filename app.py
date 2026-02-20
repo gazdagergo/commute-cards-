@@ -1,11 +1,12 @@
 import os
-from flask import Flask, render_template, request, redirect, url_for
+import json
+from flask import Flask, render_template, request, jsonify
+from markupsafe import Markup
 import psycopg
-import markdown
 
 app = Flask(__name__)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/chinese_learning_pwa")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/sociology_learning_pwa")
 
 
 def get_db():
@@ -14,359 +15,237 @@ def get_db():
 
 
 def init_db():
-    """Create tables if they don't exist and seed test data."""
+    """Create tables if they don't exist."""
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Cards table - stores learning cards with their HTML snippets
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS stories (
+                CREATE TABLE IF NOT EXISTS cards (
                     id SERIAL PRIMARY KEY,
-                    title VARCHAR(255) NOT NULL,
-                    text TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS flashcards (
-                    id SERIAL PRIMARY KEY,
-                    chinese VARCHAR(50) NOT NULL,
-                    english VARCHAR(255) NOT NULL,
-                    description TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS flashcard_stories (
-                    flashcard_id INTEGER REFERENCES flashcards(id) ON DELETE CASCADE,
-                    story_id INTEGER REFERENCES stories(id) ON DELETE CASCADE,
-                    PRIMARY KEY (flashcard_id, story_id)
-                )
-            """)
-            # New tables for story slices
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS story_slices (
-                    id SERIAL PRIMARY KEY,
-                    story_id INTEGER REFERENCES stories(id) ON DELETE CASCADE,
-                    slice_order INTEGER NOT NULL,
-                    text TEXT NOT NULL,
-                    image_url VARCHAR(512),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(story_id, slice_order)
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS flashcard_slices (
-                    flashcard_id INTEGER REFERENCES flashcards(id) ON DELETE CASCADE,
-                    slice_id INTEGER REFERENCES story_slices(id) ON DELETE CASCADE,
-                    PRIMARY KEY (flashcard_id, slice_id)
+                    semantic_description TEXT NOT NULL,
+                    course_task_ref VARCHAR(255),
+                    status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'completed', 'skipped')),
+                    card_html TEXT NOT NULL,
+                    response_schema JSONB NOT NULL
                 )
             """)
 
-            # Migration: create slices for existing stories that don't have any
+            # Responses table - stores user responses to cards
             cur.execute("""
-                INSERT INTO story_slices (story_id, slice_order, text)
-                SELECT s.id, 1, s.text
-                FROM stories s
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM story_slices ss WHERE ss.story_id = s.id
+                CREATE TABLE IF NOT EXISTS responses (
+                    id SERIAL PRIMARY KEY,
+                    card_id INTEGER REFERENCES cards(id) ON DELETE CASCADE,
+                    responded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    response_content JSONB NOT NULL,
+                    evaluation JSONB
                 )
             """)
 
-            # Migration: migrate flashcard_stories links to flashcard_slices
+            # Create index for faster queries on active cards
             cur.execute("""
-                INSERT INTO flashcard_slices (flashcard_id, slice_id)
-                SELECT fs.flashcard_id, ss.id
-                FROM flashcard_stories fs
-                JOIN story_slices ss ON ss.story_id = fs.story_id AND ss.slice_order = 1
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM flashcard_slices fsl
-                    WHERE fsl.flashcard_id = fs.flashcard_id AND fsl.slice_id = ss.id
-                )
+                CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status)
             """)
 
-            cur.execute("SELECT COUNT(*) FROM stories")
+            # Create index for faster queries on unevaluated responses
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_responses_evaluation ON responses(evaluation) WHERE evaluation IS NULL
+            """)
+
+            # Seed a sample card if the database is empty
+            cur.execute("SELECT COUNT(*) FROM cards")
             if cur.fetchone()[0] == 0:
+                sample_card_html = '''<div x-data="cardResponse()" class="p-4">
+    <div x-data="{ answer: '' }">
+        <p class="text-gray-600 text-sm mb-2">Lernziel: Grundbegriff der Soziologie verstehen</p>
+        <h2 class="text-lg font-semibold mb-4">Was versteht man unter dem Begriff "Sozialisation"?</h2>
+
+        <textarea x-model="answer"
+                  class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  rows="5"
+                  placeholder="Schreibe deine Antwort..."></textarea>
+
+        <button @click="submitResponse({ answer })"
+                :disabled="submitting || answer.trim().length < 10"
+                class="mt-4 w-full py-3 bg-indigo-600 text-white rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed">
+            <span x-show="!submitting">Antwort senden</span>
+            <span x-show="submitting">Wird gesendet...</span>
+        </button>
+
+        <p x-show="error" x-text="error" class="text-red-600 mt-2 text-sm"></p>
+    </div>
+</div>'''
+                sample_schema = json.dumps({
+                    "type": "object",
+                    "properties": {
+                        "answer": {"type": "string"}
+                    },
+                    "required": ["answer"]
+                })
                 cur.execute(
-                    "INSERT INTO stories (title, text) VALUES (%s, %s) RETURNING id",
-                    ("测试故事", "这是一个测试故事。它用来验证数据库连接是否正常工作。希望一切顺利！")
-                )
-                story_id = cur.fetchone()[0]
-                cur.execute(
-                    "INSERT INTO story_slices (story_id, slice_order, text) VALUES (%s, %s, %s)",
-                    (story_id, 1, "这是一个测试故事。它用来验证数据库连接是否正常工作。希望一切顺利！")
+                    """INSERT INTO cards (semantic_description, status, card_html, response_schema)
+                       VALUES (%s, %s, %s, %s)""",
+                    (
+                        "Define the concept of socialization (Sozialisation) - fundamental sociology term",
+                        "active",
+                        sample_card_html,
+                        sample_schema
+                    )
                 )
         conn.commit()
 
 
 @app.route("/")
 def index():
-    """List all stories."""
+    """Main app view - renders the card interface."""
+    return render_template("index.html")
+
+
+@app.route("/api/next-card")
+def api_next_card():
+    """Get the next active card to display."""
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, title, created_at FROM stories ORDER BY created_at DESC")
-            stories = cur.fetchall()
-    return render_template("index.html", stories=stories)
-
-
-@app.route("/story/<int:story_id>")
-@app.route("/story/<int:story_id>/slice/<int:slice_num>")
-def story(story_id, slice_num=1):
-    """Show a single story with slice pagination."""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, title, text, created_at FROM stories WHERE id = %s", (story_id,))
-            story = cur.fetchone()
-            if story is None:
-                return "Story not found", 404
-
-            # Get all slices for this story
+            # Get the oldest active card that hasn't been completed or skipped
             cur.execute("""
-                SELECT id, slice_order, text, image_url
-                FROM story_slices
-                WHERE story_id = %s
-                ORDER BY slice_order
-            """, (story_id,))
-            slices = cur.fetchall()
-
-            # Get total slice count
-            total_slices = len(slices)
-
-            # Validate slice_num
-            if slice_num < 1 or slice_num > total_slices:
-                slice_num = 1
-
-            # Get flashcards for ALL slices (for client-side rendering)
-            slices_data = []
-            for s in slices:
-                cur.execute("""
-                    SELECT f.id, f.chinese, f.english
-                    FROM flashcards f
-                    JOIN flashcard_slices fs ON f.id = fs.flashcard_id
-                    WHERE fs.slice_id = %s
-                    ORDER BY f.chinese
-                """, (s[0],))
-                flashcards = cur.fetchall()
-                slices_data.append({
-                    'id': s[0],
-                    'order': s[1],
-                    'text': s[2],
-                    'image_url': s[3],
-                    'flashcards': [{'id': f[0], 'chinese': f[1], 'english': f[2]} for f in flashcards]
-                })
-
-    return render_template("story.html",
-                           story=story,
-                           slices_data=slices_data,
-                           initial_slice_num=slice_num,
-                           total_slices=total_slices)
-
-
-@app.route("/story/<int:story_id>/slice/add", methods=["GET", "POST"])
-def slice_add(story_id):
-    """Add a new slice to a story."""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, title FROM stories WHERE id = %s", (story_id,))
-            story = cur.fetchone()
-            if story is None:
-                return "Story not found", 404
-
-            # Get the next slice order
-            cur.execute("""
-                SELECT COALESCE(MAX(slice_order), 0) + 1
-                FROM story_slices WHERE story_id = %s
-            """, (story_id,))
-            next_order = cur.fetchone()[0]
-
-    if request.method == "POST":
-        text = request.form.get("text", "").strip()
-        image_url = request.form.get("image_url", "").strip() or None
-        if text:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO story_slices (story_id, slice_order, text, image_url)
-                        VALUES (%s, %s, %s, %s)
-                    """, (story_id, next_order, text, image_url))
-                conn.commit()
-            return redirect(url_for("story", story_id=story_id, slice_num=next_order))
-    return render_template("slice_form.html", story=story, slice=None, next_order=next_order)
-
-
-@app.route("/story/<int:story_id>/slice/<int:slice_num>/edit", methods=["GET", "POST"])
-def slice_edit(story_id, slice_num):
-    """Edit a slice."""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, title FROM stories WHERE id = %s", (story_id,))
-            story = cur.fetchone()
-            if story is None:
-                return "Story not found", 404
-
-            cur.execute("""
-                SELECT id, slice_order, text, image_url
-                FROM story_slices
-                WHERE story_id = %s AND slice_order = %s
-            """, (story_id, slice_num))
-            slice_data = cur.fetchone()
-            if slice_data is None:
-                return "Slice not found", 404
-
-    if request.method == "POST":
-        text = request.form.get("text", "").strip()
-        image_url = request.form.get("image_url", "").strip() or None
-        if text:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        UPDATE story_slices
-                        SET text = %s, image_url = %s
-                        WHERE id = %s
-                    """, (text, image_url, slice_data[0]))
-                conn.commit()
-            return redirect(url_for("story", story_id=story_id, slice_num=slice_num))
-    return render_template("slice_form.html", story=story, slice=slice_data, next_order=None)
-
-
-@app.route("/add", methods=["GET", "POST"])
-def add():
-    """Add a new story."""
-    if request.method == "POST":
-        title = request.form.get("title", "").strip()
-        text = request.form.get("text", "").strip()
-        if title and text:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO stories (title, text) VALUES (%s, %s) RETURNING id",
-                        (title, text)
-                    )
-                    story_id = cur.fetchone()[0]
-                    # Create the first slice automatically
-                    cur.execute(
-                        "INSERT INTO story_slices (story_id, slice_order, text) VALUES (%s, %s, %s)",
-                        (story_id, 1, text)
-                    )
-                conn.commit()
-            return redirect(url_for("index"))
-    return render_template("add.html")
-
-
-@app.route("/flashcards")
-def flashcards():
-    """List all flashcards."""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, chinese, english, description, created_at FROM flashcards ORDER BY created_at DESC")
-            cards = cur.fetchall()
-    return render_template("flashcards.html", cards=cards)
-
-
-@app.route("/flashcards/<int:card_id>")
-def flashcard_detail(card_id):
-    """Show a single flashcard with Hanzi Writer animation."""
-    from_story = request.args.get("from_story", type=int)
-    from_slice = request.args.get("slice", type=int)
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, chinese, english, description FROM flashcards WHERE id = %s", (card_id,))
-            card = cur.fetchone()
-            if card is None:
-                return "Flashcard not found", 404
-            story_title = None
-            if from_story:
-                cur.execute("SELECT title FROM stories WHERE id = %s", (from_story,))
-                row = cur.fetchone()
-                if row:
-                    story_title = row[0]
-    description_html = markdown.markdown(card[3]) if card[3] else None
-    return render_template("flashcard_detail.html", card=card, from_story=from_story, from_slice=from_slice, story_title=story_title, description_html=description_html)
-
-
-@app.route("/flashcards/add", methods=["GET", "POST"])
-def flashcards_add():
-    """Add a new flashcard."""
-    preselect_slice_id = request.args.get("slice_id", type=int)
-    preselect_story_id = request.args.get("story_id", type=int)
-
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            # Get all slices grouped by story for the form
-            cur.execute("""
-                SELECT ss.id, s.id as story_id, s.title, ss.slice_order
-                FROM story_slices ss
-                JOIN stories s ON ss.story_id = s.id
-                ORDER BY s.created_at DESC, ss.slice_order
+                SELECT id, semantic_description, card_html, response_schema
+                FROM cards
+                WHERE status = 'active'
+                ORDER BY created_at ASC
+                LIMIT 1
             """)
-            slices = cur.fetchall()
+            card = cur.fetchone()
 
-    if request.method == "POST":
-        chinese = request.form.get("chinese", "").strip()
-        english = request.form.get("english", "").strip()
-        description = request.form.get("description", "").strip()
-        slice_ids = request.form.getlist("slices")
-        from_story = request.form.get("from_story", type=int)
-        if chinese and english:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO flashcards (chinese, english, description) VALUES (%s, %s, %s) RETURNING id",
-                        (chinese, english, description or None)
-                    )
-                    card_id = cur.fetchone()[0]
-                    for slice_id in slice_ids:
-                        cur.execute(
-                            "INSERT INTO flashcard_slices (flashcard_id, slice_id) VALUES (%s, %s)",
-                            (card_id, int(slice_id))
-                        )
-                conn.commit()
-            if from_story:
-                return redirect(url_for("story", story_id=from_story))
-            return redirect(url_for("flashcards"))
-    linked_slice_ids = [preselect_slice_id] if preselect_slice_id else []
-    return render_template("flashcards_form.html", card=None, slices=slices, linked_slice_ids=linked_slice_ids, from_story=preselect_story_id)
+            if card is None:
+                return jsonify({"card": None, "message": "Keine weiteren Karten verfügbar"})
+
+            # Get daily progress stats
+            cur.execute("""
+                SELECT
+                    (SELECT COUNT(*) FROM responses WHERE DATE(responded_at) = CURRENT_DATE) as today_completed,
+                    (SELECT COUNT(*) FROM cards WHERE status = 'active') as remaining
+            """)
+            stats = cur.fetchone()
+
+            return jsonify({
+                "card": {
+                    "id": card[0],
+                    "semantic_description": card[1],
+                    "card_html": card[2],
+                    "response_schema": card[3]
+                },
+                "progress": {
+                    "today_completed": stats[0],
+                    "remaining": stats[1]
+                }
+            })
 
 
-@app.route("/flashcards/<int:card_id>/edit", methods=["GET", "POST"])
-def flashcards_edit(card_id):
-    """Edit an existing flashcard."""
+@app.route("/api/response", methods=["POST"])
+def api_response():
+    """Record a response to a card."""
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    card_id = data.get("card_id")
+    response_content = data.get("response_content")
+
+    if not card_id or response_content is None:
+        return jsonify({"error": "Missing card_id or response_content"}), 400
+
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, chinese, english, description FROM flashcards WHERE id = %s", (card_id,))
+            # Verify the card exists and is active
+            cur.execute("SELECT id, status FROM cards WHERE id = %s", (card_id,))
             card = cur.fetchone()
-            if card is None:
-                return "Flashcard not found", 404
-            # Get all slices grouped by story
-            cur.execute("""
-                SELECT ss.id, s.id as story_id, s.title, ss.slice_order
-                FROM story_slices ss
-                JOIN stories s ON ss.story_id = s.id
-                ORDER BY s.created_at DESC, ss.slice_order
-            """)
-            slices = cur.fetchall()
-            cur.execute("SELECT slice_id FROM flashcard_slices WHERE flashcard_id = %s", (card_id,))
-            linked_slice_ids = [row[0] for row in cur.fetchall()]
 
-    if request.method == "POST":
-        chinese = request.form.get("chinese", "").strip()
-        english = request.form.get("english", "").strip()
-        description = request.form.get("description", "").strip()
-        slice_ids = request.form.getlist("slices")
-        if chinese and english:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE flashcards SET chinese = %s, english = %s, description = %s WHERE id = %s",
-                        (chinese, english, description or None, card_id)
-                    )
-                    cur.execute("DELETE FROM flashcard_slices WHERE flashcard_id = %s", (card_id,))
-                    for slice_id in slice_ids:
-                        cur.execute(
-                            "INSERT INTO flashcard_slices (flashcard_id, slice_id) VALUES (%s, %s)",
-                            (card_id, int(slice_id))
-                        )
-                conn.commit()
-            return redirect(url_for("flashcard_detail", card_id=card_id))
-    return render_template("flashcards_form.html", card=card, slices=slices, linked_slice_ids=linked_slice_ids, from_story=None)
+            if card is None:
+                return jsonify({"error": "Card not found"}), 404
+
+            if card[1] != 'active':
+                return jsonify({"error": "Card is not active"}), 400
+
+            # Insert the response
+            cur.execute(
+                """INSERT INTO responses (card_id, response_content)
+                   VALUES (%s, %s)
+                   RETURNING id""",
+                (card_id, json.dumps(response_content))
+            )
+            response_id = cur.fetchone()[0]
+
+            # Mark the card as completed
+            cur.execute(
+                "UPDATE cards SET status = 'completed' WHERE id = %s",
+                (card_id,)
+            )
+
+        conn.commit()
+
+    return jsonify({
+        "success": True,
+        "response_id": response_id,
+        "message": "Aufgezeichnet"
+    })
+
+
+@app.route("/api/skip", methods=["POST"])
+def api_skip():
+    """Skip a card."""
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    card_id = data.get("card_id")
+
+    if not card_id:
+        return jsonify({"error": "Missing card_id"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE cards SET status = 'skipped' WHERE id = %s AND status = 'active'",
+                (card_id,)
+            )
+            if cur.rowcount == 0:
+                return jsonify({"error": "Card not found or not active"}), 404
+
+        conn.commit()
+
+    return jsonify({"success": True, "message": "Übersprungen"})
+
+
+@app.route("/api/stats")
+def api_stats():
+    """Get learning statistics."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    (SELECT COUNT(*) FROM cards WHERE status = 'active') as active_cards,
+                    (SELECT COUNT(*) FROM cards WHERE status = 'completed') as completed_cards,
+                    (SELECT COUNT(*) FROM cards WHERE status = 'skipped') as skipped_cards,
+                    (SELECT COUNT(*) FROM responses WHERE DATE(responded_at) = CURRENT_DATE) as today_responses,
+                    (SELECT COUNT(*) FROM responses WHERE evaluation IS NULL) as pending_evaluations
+            """)
+            stats = cur.fetchone()
+
+    return jsonify({
+        "active_cards": stats[0],
+        "completed_cards": stats[1],
+        "skipped_cards": stats[2],
+        "today_responses": stats[3],
+        "pending_evaluations": stats[4]
+    })
+
+
+@app.route("/test-card")
+def test_card():
+    """Test harness for card HTML snippets."""
+    return render_template("test_card.html")
 
 
 @app.route("/health")
@@ -379,6 +258,12 @@ def health():
         return "OK", 200
     except Exception as e:
         return f"DB Error: {e}", 500
+
+
+# Template filter to mark HTML as safe
+@app.template_filter('safe_html')
+def safe_html(s):
+    return Markup(s)
 
 
 if __name__ == "__main__":
