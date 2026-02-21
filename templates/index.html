@@ -58,13 +58,7 @@
             </div>
 
             <!-- Card container -->
-            <div x-show="!loading && currentCard" x-cloak>
-                <!-- Success message after submission -->
-                <div x-show="showSuccess" x-cloak
-                     class="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg text-center">
-                    <p class="text-green-800 font-medium" x-text="successMessage"></p>
-                </div>
-
+            <div x-show="!loading && currentCard && !showFeedback" x-cloak>
                 <!-- Card wrapper -->
                 <div class="bg-white rounded-xl shadow-sm overflow-hidden">
                     <!-- Dynamic card content -->
@@ -77,6 +71,82 @@
                             :disabled="submitting"
                             class="text-gray-500 text-sm hover:text-gray-700 disabled:opacity-50">
                         Überspringen
+                    </button>
+                </div>
+            </div>
+
+            <!-- Feedback form after submission -->
+            <div x-show="showFeedback" x-cloak class="bg-white rounded-xl shadow-sm p-4">
+                <div class="text-center mb-4">
+                    <div class="inline-flex items-center justify-center w-12 h-12 bg-green-100 rounded-full mb-3">
+                        <svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                        </svg>
+                    </div>
+                    <p class="text-green-800 font-medium" x-text="successMessage"></p>
+                </div>
+
+                <!-- Scheduling section -->
+                <div class="border-t pt-4 mb-4">
+                    <p class="text-gray-700 text-sm mb-3 text-center">Wann willst du diese Karte wiederholen?</p>
+
+                    <div class="flex flex-col gap-2">
+                        <!-- Repeat today -->
+                        <button @click="scheduleType = 'today'"
+                                class="w-full py-2 px-3 rounded-lg text-sm text-left border transition-colors"
+                                :class="scheduleType === 'today' ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-gray-300 text-gray-700'">
+                            Heute nochmal
+                        </button>
+
+                        <!-- In X days -->
+                        <div class="flex items-center gap-2">
+                            <button @click="scheduleType = 'days'"
+                                    class="flex-1 py-2 px-3 rounded-lg text-sm text-left border transition-colors"
+                                    :class="scheduleType === 'days' ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-gray-300 text-gray-700'">
+                                In
+                                <input type="number" x-model.number="scheduleDays"
+                                       @click.stop @focus="scheduleType = 'days'"
+                                       min="1" max="365"
+                                       class="w-12 mx-1 px-2 py-0.5 border border-gray-300 rounded text-center text-sm focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500">
+                                Tagen
+                            </button>
+                        </div>
+
+                        <!-- Never repeat -->
+                        <button @click="scheduleType = 'never'"
+                                class="w-full py-2 px-3 rounded-lg text-sm text-left border transition-colors"
+                                :class="scheduleType === 'never' ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-gray-300 text-gray-700'">
+                            Nicht wiederholen
+                        </button>
+                    </div>
+                </div>
+
+                <div class="border-t pt-4">
+                    <p class="text-gray-700 text-sm mb-3 text-center">Wie hat dir diese Karte gefallen? (optional)</p>
+
+                    <!-- Star rating -->
+                    <div class="flex justify-center gap-1 mb-4">
+                        <template x-for="star in [1, 2, 3, 4, 5]" :key="star">
+                            <button @click="feedbackRating = star"
+                                    class="text-3xl transition-transform hover:scale-110 focus:outline-none"
+                                    :class="star <= feedbackRating ? 'text-yellow-400' : 'text-gray-300'">
+                                ★
+                            </button>
+                        </template>
+                    </div>
+
+                    <!-- Optional comment -->
+                    <textarea x-model="feedbackComment"
+                              class="w-full p-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                              rows="2"
+                              placeholder="Ideen, Verbesserungsvorschläge... (optional)"></textarea>
+
+                    <!-- Submit -->
+                    <button @click="submitScheduleAndFeedback()"
+                            :disabled="!scheduleType || submittingFeedback"
+                            class="w-full mt-3 py-3 bg-indigo-600 text-white rounded-lg text-sm font-medium disabled:opacity-50">
+                        <span x-show="!submittingFeedback">Weiter</span>
+                        <span x-show="submittingFeedback">...</span>
                     </button>
                 </div>
             </div>
@@ -121,8 +191,8 @@
 
                         this.submitted = true;
 
-                        // Notify parent app of successful submission
-                        app.onCardSubmitted(result.message);
+                        // Notify parent app of successful submission with response_id
+                        app.onCardSubmitted(result.message, result.response_id);
 
                     } catch (e) {
                         this.error = e.message;
@@ -140,12 +210,21 @@
                 progress: null,
                 loading: true,
                 submitting: false,
-                showSuccess: false,
                 successMessage: '',
+                // Feedback state
+                showFeedback: false,
+                currentResponseId: null,
+                feedbackRating: 0,
+                feedbackComment: '',
+                submittingFeedback: false,
+                // Scheduling state
+                scheduleType: null, // 'today', 'days', 'never'
+                scheduleDays: 3,
 
                 async loadNextCard() {
                     this.loading = true;
-                    this.showSuccess = false;
+                    this.showFeedback = false;
+                    this.resetFeedback();
 
                     try {
                         const response = await fetch('/api/next-card');
@@ -161,14 +240,59 @@
                     }
                 },
 
-                onCardSubmitted(message) {
-                    this.successMessage = message || 'Aufgezeichnet';
-                    this.showSuccess = true;
+                resetFeedback() {
+                    this.feedbackRating = 0;
+                    this.feedbackComment = '';
+                    this.currentResponseId = null;
+                    this.scheduleType = null;
+                    this.scheduleDays = 3;
+                },
 
-                    // Load next card after a brief delay
-                    setTimeout(() => {
+                onCardSubmitted(message, responseId) {
+                    this.successMessage = message || 'Aufgezeichnet';
+                    this.currentResponseId = responseId;
+                    this.showFeedback = true;
+                },
+
+                async submitScheduleAndFeedback() {
+                    if (!this.scheduleType || this.submittingFeedback) return;
+
+                    this.submittingFeedback = true;
+
+                    try {
+                        // Submit schedule
+                        const scheduleData = {
+                            card_id: this.currentCard.id,
+                            schedule_type: this.scheduleType
+                        };
+                        if (this.scheduleType === 'days') {
+                            scheduleData.days = this.scheduleDays;
+                        }
+
+                        await fetch('/api/schedule', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(scheduleData)
+                        });
+
+                        // Submit feedback if rating provided
+                        if (this.feedbackRating > 0) {
+                            await fetch('/api/feedback', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    response_id: this.currentResponseId,
+                                    rating: this.feedbackRating,
+                                    comment: this.feedbackComment
+                                })
+                            });
+                        }
+                    } catch (e) {
+                        console.error('Failed to submit:', e);
+                    } finally {
+                        this.submittingFeedback = false;
                         this.loadNextCard();
-                    }, 1500);
+                    }
                 },
 
                 async skipCard() {

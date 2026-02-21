@@ -52,6 +52,58 @@ def init_db():
                 CREATE INDEX IF NOT EXISTS idx_responses_evaluation ON responses(evaluation) WHERE evaluation IS NULL
             """)
 
+            # Migration: Add feedback column to responses table
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'responses' AND column_name = 'feedback'
+                    ) THEN
+                        ALTER TABLE responses ADD COLUMN feedback JSONB;
+                    END IF;
+                END $$;
+            """)
+
+            # Migration: Add scheduled_for column to cards table
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'cards' AND column_name = 'scheduled_for'
+                    ) THEN
+                        ALTER TABLE cards ADD COLUMN scheduled_for DATE;
+                    END IF;
+                END $$;
+            """)
+
+            # Migration: Update status CHECK constraint to allow 'scheduled'
+            cur.execute("""
+                DO $$
+                BEGIN
+                    ALTER TABLE cards DROP CONSTRAINT IF EXISTS cards_status_check;
+                    ALTER TABLE cards ADD CONSTRAINT cards_status_check
+                        CHECK (status IN ('active', 'completed', 'skipped', 'scheduled'));
+                EXCEPTION
+                    WHEN others THEN NULL;
+                END $$;
+            """)
+
+            # Migration: Add queued_at column for queue ordering
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'cards' AND column_name = 'queued_at'
+                    ) THEN
+                        ALTER TABLE cards ADD COLUMN queued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+                        UPDATE cards SET queued_at = created_at WHERE queued_at IS NULL;
+                    END IF;
+                END $$;
+            """)
+
             # Seed a sample card if the database is empty
             cur.execute("SELECT COUNT(*) FROM cards")
             if cur.fetchone()[0] == 0:
@@ -106,12 +158,17 @@ def api_next_card():
     """Get the next active card to display."""
     with get_db() as conn:
         with conn.cursor() as cur:
-            # Get the oldest active card that hasn't been completed or skipped
+            # Get active cards OR scheduled cards that are due today or earlier
+            # Order by queued_at so "repeat today" cards go to end of queue
             cur.execute("""
                 SELECT id, semantic_description, card_html, response_schema
                 FROM cards
                 WHERE status = 'active'
-                ORDER BY created_at ASC
+                   OR (status = 'scheduled' AND scheduled_for <= CURRENT_DATE)
+                ORDER BY
+                    CASE WHEN status = 'scheduled' THEN 0 ELSE 1 END,
+                    scheduled_for ASC NULLS LAST,
+                    queued_at ASC NULLS FIRST
                 LIMIT 1
             """)
             card = cur.fetchone()
@@ -157,17 +214,23 @@ def api_response():
 
     with get_db() as conn:
         with conn.cursor() as cur:
-            # Verify the card exists and is active
-            cur.execute("SELECT id, status FROM cards WHERE id = %s", (card_id,))
+            # Verify the card exists and is active or due scheduled
+            cur.execute("""
+                SELECT id, status, scheduled_for FROM cards WHERE id = %s
+            """, (card_id,))
             card = cur.fetchone()
 
             if card is None:
                 return jsonify({"error": "Card not found"}), 404
 
-            if card[1] != 'active':
+            status = card[1]
+            scheduled_for = card[2]
+            is_due = status == 'active' or (status == 'scheduled' and scheduled_for is not None)
+
+            if not is_due:
                 return jsonify({"error": "Card is not active"}), 400
 
-            # Insert the response
+            # Insert the response (card status will be updated via /api/schedule)
             cur.execute(
                 """INSERT INTO responses (card_id, response_content)
                    VALUES (%s, %s)
@@ -175,12 +238,6 @@ def api_response():
                 (card_id, json.dumps(response_content))
             )
             response_id = cur.fetchone()[0]
-
-            # Mark the card as completed
-            cur.execute(
-                "UPDATE cards SET status = 'completed' WHERE id = %s",
-                (card_id,)
-            )
 
         conn.commit()
 
@@ -207,7 +264,8 @@ def api_skip():
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE cards SET status = 'skipped' WHERE id = %s AND status = 'active'",
+                """UPDATE cards SET status = 'skipped', scheduled_for = NULL
+                   WHERE id = %s AND (status = 'active' OR status = 'scheduled')""",
                 (card_id,)
             )
             if cur.rowcount == 0:
@@ -240,6 +298,94 @@ def api_stats():
         "today_responses": stats[3],
         "pending_evaluations": stats[4]
     })
+
+
+@app.route("/api/feedback", methods=["POST"])
+def api_feedback():
+    """Record feedback for a response."""
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    response_id = data.get("response_id")
+    rating = data.get("rating")  # 1-5 stars
+    comment = data.get("comment", "")  # optional text feedback
+
+    if not response_id or rating is None:
+        return jsonify({"error": "Missing response_id or rating"}), 400
+
+    if not isinstance(rating, int) or rating < 1 or rating > 5:
+        return jsonify({"error": "Rating must be integer 1-5"}), 400
+
+    feedback = {
+        "rating": rating,
+        "comment": comment.strip() if comment else None
+    }
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE responses SET feedback = %s WHERE id = %s",
+                (json.dumps(feedback), response_id)
+            )
+            if cur.rowcount == 0:
+                return jsonify({"error": "Response not found"}), 404
+
+        conn.commit()
+
+    return jsonify({"success": True, "message": "Feedback gespeichert"})
+
+
+@app.route("/api/schedule", methods=["POST"])
+def api_schedule():
+    """Schedule a card for repetition."""
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    card_id = data.get("card_id")
+    schedule_type = data.get("schedule_type")  # 'today', 'days', 'never'
+    days = data.get("days")  # number of days (only for 'days' type)
+
+    if not card_id or not schedule_type:
+        return jsonify({"error": "Missing card_id or schedule_type"}), 400
+
+    if schedule_type not in ['today', 'days', 'never']:
+        return jsonify({"error": "Invalid schedule_type"}), 400
+
+    if schedule_type == 'days':
+        if not isinstance(days, int) or days < 1:
+            return jsonify({"error": "Days must be a positive integer"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if schedule_type == 'today':
+                # Keep card active, move to end of queue
+                cur.execute(
+                    "UPDATE cards SET status = 'active', scheduled_for = NULL, queued_at = NOW() WHERE id = %s",
+                    (card_id,)
+                )
+            elif schedule_type == 'days':
+                # Schedule for future date
+                cur.execute(
+                    "UPDATE cards SET status = 'scheduled', scheduled_for = CURRENT_DATE + %s WHERE id = %s",
+                    (days, card_id)
+                )
+            elif schedule_type == 'never':
+                # Mark as completed
+                cur.execute(
+                    "UPDATE cards SET status = 'completed', scheduled_for = NULL WHERE id = %s",
+                    (card_id,)
+                )
+
+            if cur.rowcount == 0:
+                return jsonify({"error": "Card not found"}), 404
+
+        conn.commit()
+
+    return jsonify({"success": True, "message": "Zeitplan gespeichert"})
 
 
 @app.route("/test-card")
