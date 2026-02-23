@@ -104,6 +104,20 @@ def init_db():
                 END $$;
             """)
 
+            # Migration: Add notes column to cards table
+            # Note: Will move to user_cards table when multi-user auth is implemented
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'cards' AND column_name = 'notes'
+                    ) THEN
+                        ALTER TABLE cards ADD COLUMN notes TEXT;
+                    END IF;
+                END $$;
+            """)
+
             # Seed a sample card if the database is empty
             cur.execute("SELECT COUNT(*) FROM cards")
             if cur.fetchone()[0] == 0:
@@ -161,7 +175,7 @@ def api_next_card():
             # Get active cards OR scheduled cards that are due today or earlier
             # Order by queued_at so "repeat today" cards go to end of queue
             cur.execute("""
-                SELECT id, semantic_description, card_html, response_schema
+                SELECT id, semantic_description, card_html, response_schema, notes
                 FROM cards
                 WHERE status = 'active'
                    OR (status = 'scheduled' AND scheduled_for <= CURRENT_DATE)
@@ -189,7 +203,8 @@ def api_next_card():
                     "id": card[0],
                     "semantic_description": card[1],
                     "card_html": card[2],
-                    "response_schema": card[3]
+                    "response_schema": card[3],
+                    "notes": card[4]
                 },
                 "progress": {
                     "today_completed": stats[0],
@@ -386,6 +401,41 @@ def api_schedule():
         conn.commit()
 
     return jsonify({"success": True, "message": "Zeitplan gespeichert"})
+
+
+@app.route("/api/card/<int:card_id>/notes", methods=["GET", "POST"])
+def api_card_notes(card_id):
+    """Get or update notes for a card.
+
+    Note: Currently stores notes per-card. Will be migrated to user_cards
+    table when multi-user authentication is implemented.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if request.method == "GET":
+                cur.execute("SELECT notes FROM cards WHERE id = %s", (card_id,))
+                result = cur.fetchone()
+                if result is None:
+                    return jsonify({"error": "Card not found"}), 404
+                return jsonify({"notes": result[0]})
+
+            else:  # POST
+                data = request.get_json()
+                if not data:
+                    return jsonify({"error": "No data provided"}), 400
+
+                notes = data.get("notes", "")
+
+                cur.execute(
+                    "UPDATE cards SET notes = %s WHERE id = %s",
+                    (notes if notes.strip() else None, card_id)
+                )
+
+                if cur.rowcount == 0:
+                    return jsonify({"error": "Card not found"}), 404
+
+                conn.commit()
+                return jsonify({"success": True, "message": "Notizen gespeichert"})
 
 
 @app.route("/test-card")

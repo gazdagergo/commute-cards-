@@ -11,6 +11,7 @@
     <link rel="manifest" href="/static/manifest.json">
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <style>
         [x-cloak] { display: none !important; }
@@ -20,6 +21,28 @@
         /* Safe area insets for notched phones */
         .safe-top { padding-top: env(safe-area-inset-top); }
         .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+        /* Notes drawer */
+        .notes-drawer {
+            transform: translateY(100%);
+            transition: transform 0.3s ease-out;
+        }
+        .notes-drawer.open {
+            transform: translateY(0);
+        }
+        /* Markdown content styling */
+        .markdown-content h1 { font-size: 1.5em; font-weight: bold; margin: 0.5em 0; }
+        .markdown-content h2 { font-size: 1.25em; font-weight: bold; margin: 0.5em 0; }
+        .markdown-content h3 { font-size: 1.1em; font-weight: bold; margin: 0.5em 0; }
+        .markdown-content p { margin: 0.5em 0; }
+        .markdown-content ul, .markdown-content ol { margin: 0.5em 0; padding-left: 1.5em; }
+        .markdown-content li { margin: 0.25em 0; }
+        .markdown-content code { background: #f3f4f6; padding: 0.1em 0.3em; border-radius: 0.25em; font-size: 0.9em; }
+        .markdown-content pre { background: #f3f4f6; padding: 0.75em; border-radius: 0.5em; overflow-x: auto; }
+        .markdown-content pre code { background: none; padding: 0; }
+        .markdown-content blockquote { border-left: 3px solid #d1d5db; padding-left: 1em; margin: 0.5em 0; color: #6b7280; }
+        .markdown-content a { color: #4f46e5; text-decoration: underline; }
+        .markdown-content strong { font-weight: 600; }
+        .markdown-content em { font-style: italic; }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen safe-top safe-bottom">
@@ -60,7 +83,18 @@
             <!-- Card container -->
             <div x-show="!loading && currentCard && !showFeedback" x-cloak>
                 <!-- Card wrapper -->
-                <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+                <div class="bg-white rounded-xl shadow-sm overflow-hidden relative">
+                    <!-- Notes icon -->
+                    <button @click="openNotesDrawer()"
+                            class="absolute top-3 right-3 z-10 p-2 rounded-full transition-colors"
+                            :class="currentCard?.notes ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'"
+                            title="Notizen">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                    </button>
+
                     <!-- Dynamic card content -->
                     <div id="card-content" x-html="currentCard?.card_html"></div>
                 </div>
@@ -72,6 +106,70 @@
                             class="text-gray-500 text-sm hover:text-gray-700 disabled:opacity-50">
                         Überspringen
                     </button>
+                </div>
+            </div>
+
+            <!-- Notes Drawer -->
+            <div x-show="notesDrawerOpen" x-cloak class="fixed inset-0 z-50">
+                <!-- Backdrop -->
+                <div @click="closeNotesDrawer()"
+                     class="absolute inset-0 bg-black/50 transition-opacity"
+                     :class="notesDrawerOpen ? 'opacity-100' : 'opacity-0'"></div>
+
+                <!-- Drawer -->
+                <div class="notes-drawer absolute bottom-0 left-0 right-0 bg-white rounded-t-2xl max-h-[80vh] flex flex-col"
+                     :class="notesDrawerOpen ? 'open' : ''">
+                    <!-- Handle -->
+                    <div class="flex justify-center py-2">
+                        <div class="w-12 h-1 bg-gray-300 rounded-full"></div>
+                    </div>
+
+                    <!-- Header -->
+                    <div class="flex items-center justify-between px-4 pb-3 border-b">
+                        <h3 class="font-semibold text-gray-800">Notizen</h3>
+                        <div class="flex gap-2">
+                            <button x-show="!notesEditMode"
+                                    @click="enterNotesEditMode()"
+                                    class="px-3 py-1 text-sm bg-indigo-100 text-indigo-700 rounded-lg">
+                                Bearbeiten
+                            </button>
+                            <button x-show="notesEditMode"
+                                    @click="saveNotes()"
+                                    :disabled="notesSaving"
+                                    class="px-3 py-1 text-sm bg-indigo-600 text-white rounded-lg disabled:opacity-50">
+                                <span x-show="!notesSaving">Speichern</span>
+                                <span x-show="notesSaving">...</span>
+                            </button>
+                            <button x-show="notesEditMode"
+                                    @click="cancelNotesEdit()"
+                                    class="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-lg">
+                                Abbrechen
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Content -->
+                    <div class="flex-1 overflow-y-auto p-4">
+                        <!-- View mode -->
+                        <div x-show="!notesEditMode">
+                            <div x-show="currentCard?.notes"
+                                 class="markdown-content text-gray-700"
+                                 x-html="renderMarkdown(currentCard?.notes || '')"></div>
+                            <p x-show="!currentCard?.notes" class="text-gray-400 text-center py-8">
+                                Noch keine Notizen. Tippe auf "Bearbeiten" um welche hinzuzufuegen.
+                            </p>
+                        </div>
+
+                        <!-- Edit mode -->
+                        <div x-show="notesEditMode">
+                            <textarea x-model="notesEditText"
+                                      class="w-full h-64 p-3 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                                      placeholder="Notizen hier eingeben... (Markdown wird unterstuetzt)"></textarea>
+                            <p class="text-xs text-gray-500 mt-2">
+                                Markdown wird unterstuetzt: **fett**, *kursiv*, # Ueberschrift, - Liste, `code`
+                            </p>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -220,11 +318,17 @@
                 // Scheduling state
                 scheduleType: null, // 'today', 'days', 'never'
                 scheduleDays: 3,
+                // Notes state
+                notesDrawerOpen: false,
+                notesEditMode: false,
+                notesEditText: '',
+                notesSaving: false,
 
                 async loadNextCard() {
                     this.loading = true;
                     this.showFeedback = false;
                     this.resetFeedback();
+                    this.closeNotesDrawer();
 
                     try {
                         const response = await fetch('/api/next-card');
@@ -314,6 +418,61 @@
                         console.error('Failed to skip card:', e);
                     } finally {
                         this.submitting = false;
+                    }
+                },
+
+                // Notes methods
+                openNotesDrawer() {
+                    this.notesDrawerOpen = true;
+                    this.notesEditMode = false;
+                },
+
+                closeNotesDrawer() {
+                    this.notesDrawerOpen = false;
+                    this.notesEditMode = false;
+                    this.notesEditText = '';
+                },
+
+                enterNotesEditMode() {
+                    this.notesEditText = this.currentCard?.notes || '';
+                    this.notesEditMode = true;
+                },
+
+                cancelNotesEdit() {
+                    this.notesEditMode = false;
+                    this.notesEditText = '';
+                },
+
+                async saveNotes() {
+                    if (!this.currentCard || this.notesSaving) return;
+
+                    this.notesSaving = true;
+
+                    try {
+                        const response = await fetch(`/api/card/${this.currentCard.id}/notes`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ notes: this.notesEditText })
+                        });
+
+                        if (response.ok) {
+                            // Update local state
+                            this.currentCard.notes = this.notesEditText.trim() || null;
+                            this.notesEditMode = false;
+                        }
+                    } catch (e) {
+                        console.error('Failed to save notes:', e);
+                    } finally {
+                        this.notesSaving = false;
+                    }
+                },
+
+                renderMarkdown(text) {
+                    if (!text) return '';
+                    try {
+                        return marked.parse(text);
+                    } catch (e) {
+                        return text;
                     }
                 }
             };
