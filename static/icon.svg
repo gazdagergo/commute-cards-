@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="256" fill="#4f46e5"/>
+
+  <!-- Open book -->
+  <g transform="translate(256, 280)">
+    <!-- Left page -->
+    <path d="M-20,-100
+             C-20,-100 -140,-90 -140,-80
+             L-140,80
+             C-140,90 -20,100 -20,100
+             L-20,-100 Z"
+          fill="#ffffff"
+          stroke="#e0e0e0"
+          stroke-width="2"/>
+
+    <!-- Right page -->
+    <path d="M20,-100
+             C20,-100 140,-90 140,-80
+             L140,80
+             C140,90 20,100 20,100
+             L20,-100 Z"
+          fill="#ffffff"
+          stroke="#e0e0e0"
+          stroke-width="2"/>
+
+    <!-- Spine shadow -->
+    <path d="M-20,-100 L-20,100 L20,100 L20,-100 Z"
+          fill="#e8e8e8"/>
+
+    <!-- Center fold line -->
+    <line x1="0" y1="-95" x2="0" y2="95"
+          stroke="#d0d0d0"
+          stroke-width="2"/>
+
+    <!-- Left page lines -->
+    <g stroke="#c0c0c0" stroke-width="3" stroke-linecap="round">
+      <line x1="-110" y1="-50" x2="-40" y2="-50"/>
+      <line x1="-110" y1="-20" x2="-40" y2="-20"/>
+      <line x1="-110" y1="10" x2="-40" y2="10"/>
+      <line x1="-110" y1="40" x2="-70" y2="40"/>
+    </g>
+
+    <!-- Right page lines -->
+    <g stroke="#c0c0c0" stroke-width="3" stroke-linecap="round">
+      <line x1="40" y1="-50" x2="110" y2="-50"/>
+      <line x1="40" y1="-20" x2="110" y2="-20"/>
+      <line x1="40" y1="10" x2="110" y2="10"/>
+      <line x1="40" y1="40" x2="80" y2="40"/>
+    </g>
+  </g>
+</svg>
