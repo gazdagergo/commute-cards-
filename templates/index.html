@@ -13,6 +13,8 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <!-- Local-first modules -->
+    <script type="module" src="/static/js/app.js"></script>
     <style>
         [x-cloak] { display: none !important; }
         body {
@@ -28,6 +30,14 @@
         }
         .notes-drawer.open {
             transform: translateY(0);
+        }
+        /* Sync button pulse animation */
+        @keyframes pulse-amber {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        .sync-pending {
+            animation: pulse-amber 2s infinite;
         }
         /* Markdown content styling */
         .markdown-content h1 { font-size: 1.5em; font-weight: bold; margin: 0.5em 0; }
@@ -46,18 +56,43 @@
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen safe-top safe-bottom">
-    <div x-data="learningApp()" x-init="loadNextCard()" class="max-w-lg mx-auto">
-        <!-- Header with progress -->
+    <div x-data="learningApp()" x-init="init()" class="max-w-lg mx-auto">
+        <!-- Header with progress and sync -->
         <header class="bg-indigo-600 text-white px-4 py-3 sticky top-0 z-10">
             <div class="flex items-center justify-between">
                 <h1 class="font-semibold">Soziologie</h1>
                 <div class="flex items-center gap-3 text-sm">
-                    <span x-show="progress" x-cloak>
-                        <span x-text="progress.today_completed"></span> heute
+                    <!-- Stats -->
+                    <span x-show="stats" x-cloak>
+                        <span x-text="stats.completed_today"></span> heute
                     </span>
-                    <span x-show="progress" x-cloak class="text-indigo-200">
-                        <span x-text="progress.remaining"></span> offen
+                    <span x-show="stats" x-cloak class="text-indigo-200">
+                        <span x-text="stats.remaining"></span> offen
                     </span>
+
+                    <!-- Sync button -->
+                    <button @click="doSync()"
+                            :disabled="syncState.isSyncing || !syncState.isOnline"
+                            class="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors"
+                            :class="{
+                                'bg-indigo-500 hover:bg-indigo-400': syncState.isOnline && !syncState.isSyncing,
+                                'bg-indigo-700 cursor-not-allowed': !syncState.isOnline,
+                                'bg-amber-500 sync-pending': syncState.pendingCount > 0 && !syncState.isSyncing
+                            }">
+                        <!-- Sync icon -->
+                        <svg x-show="!syncState.isSyncing" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        <!-- Spinning icon while syncing -->
+                        <svg x-show="syncState.isSyncing" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <!-- Status text -->
+                        <span x-show="syncState.pendingCount > 0 && !syncState.isSyncing" x-text="syncState.pendingCount"></span>
+                        <span x-show="!syncState.isOnline">Offline</span>
+                    </button>
                 </div>
             </div>
         </header>
@@ -74,10 +109,13 @@
                 <div class="text-6xl mb-4">🎉</div>
                 <h2 class="text-xl font-semibold text-gray-800 mb-2">Alles erledigt!</h2>
                 <p class="text-gray-600 mb-6">Keine weiteren Karten verfügbar.</p>
-                <button @click="loadNextCard()"
-                        class="px-6 py-2 bg-indigo-600 text-white rounded-lg">
-                    Aktualisieren
+                <button @click="doSync()"
+                        :disabled="syncState.isSyncing || !syncState.isOnline"
+                        class="px-6 py-2 bg-indigo-600 text-white rounded-lg disabled:opacity-50">
+                    <span x-show="!syncState.isSyncing">Synchronisieren</span>
+                    <span x-show="syncState.isSyncing">Wird synchronisiert...</span>
                 </button>
+                <p class="text-gray-500 text-sm mt-4" x-text="'Letzte Synchronisation: ' + getLastSyncText()"></p>
             </div>
 
             <!-- Card container -->
@@ -182,6 +220,7 @@
                         </svg>
                     </div>
                     <p class="text-green-800 font-medium" x-text="successMessage"></p>
+                    <p class="text-gray-500 text-xs mt-1">Wird beim nächsten Sync hochgeladen</p>
                 </div>
 
                 <!-- Scheduling section -->
@@ -249,235 +288,13 @@
                 </div>
             </div>
         </main>
+
+        <!-- Offline indicator bar -->
+        <div x-show="!syncState.isOnline" x-cloak
+             class="fixed bottom-0 left-0 right-0 bg-gray-800 text-white text-center py-2 text-sm safe-bottom">
+            Offline - Antworten werden lokal gespeichert
+        </div>
     </div>
-
-    <script>
-        // Global card response component - available to all card HTML snippets
-        function cardResponse() {
-            return {
-                submitting: false,
-                submitted: false,
-                error: null,
-
-                async submitResponse(data) {
-                    this.submitting = true;
-                    this.error = null;
-
-                    try {
-                        // Get the card ID from the parent learningApp
-                        const app = Alpine.$data(document.querySelector('[x-data*="learningApp"]'));
-                        const cardId = app.currentCard?.id;
-
-                        if (!cardId) {
-                            throw new Error('Keine Karte geladen');
-                        }
-
-                        const response = await fetch('/api/response', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                card_id: cardId,
-                                response_content: data
-                            })
-                        });
-
-                        const result = await response.json();
-
-                        if (!response.ok) {
-                            throw new Error(result.error || 'Fehler beim Senden');
-                        }
-
-                        this.submitted = true;
-
-                        // Notify parent app of successful submission with response_id
-                        app.onCardSubmitted(result.message, result.response_id);
-
-                    } catch (e) {
-                        this.error = e.message;
-                    } finally {
-                        this.submitting = false;
-                    }
-                }
-            };
-        }
-
-        // Main learning app component
-        function learningApp() {
-            return {
-                currentCard: null,
-                progress: null,
-                loading: true,
-                submitting: false,
-                successMessage: '',
-                // Feedback state
-                showFeedback: false,
-                currentResponseId: null,
-                feedbackRating: 0,
-                feedbackComment: '',
-                submittingFeedback: false,
-                // Scheduling state
-                scheduleType: null, // 'today', 'days', 'never'
-                scheduleDays: 3,
-                // Notes state
-                notesDrawerOpen: false,
-                notesEditMode: false,
-                notesEditText: '',
-                notesSaving: false,
-
-                async loadNextCard() {
-                    this.loading = true;
-                    this.showFeedback = false;
-                    this.resetFeedback();
-                    this.closeNotesDrawer();
-
-                    try {
-                        const response = await fetch('/api/next-card');
-                        const data = await response.json();
-
-                        this.currentCard = data.card;
-                        this.progress = data.progress;
-
-                    } catch (e) {
-                        console.error('Failed to load card:', e);
-                    } finally {
-                        this.loading = false;
-                    }
-                },
-
-                resetFeedback() {
-                    this.feedbackRating = 0;
-                    this.feedbackComment = '';
-                    this.currentResponseId = null;
-                    this.scheduleType = null;
-                    this.scheduleDays = 3;
-                },
-
-                onCardSubmitted(message, responseId) {
-                    this.successMessage = message || 'Aufgezeichnet';
-                    this.currentResponseId = responseId;
-                    this.showFeedback = true;
-                },
-
-                async submitScheduleAndFeedback() {
-                    if (!this.scheduleType || this.submittingFeedback) return;
-
-                    this.submittingFeedback = true;
-
-                    try {
-                        // Submit schedule
-                        const scheduleData = {
-                            card_id: this.currentCard.id,
-                            schedule_type: this.scheduleType
-                        };
-                        if (this.scheduleType === 'days') {
-                            scheduleData.days = this.scheduleDays;
-                        }
-
-                        await fetch('/api/schedule', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(scheduleData)
-                        });
-
-                        // Submit feedback if rating provided
-                        if (this.feedbackRating > 0) {
-                            await fetch('/api/feedback', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    response_id: this.currentResponseId,
-                                    rating: this.feedbackRating,
-                                    comment: this.feedbackComment
-                                })
-                            });
-                        }
-                    } catch (e) {
-                        console.error('Failed to submit:', e);
-                    } finally {
-                        this.submittingFeedback = false;
-                        this.loadNextCard();
-                    }
-                },
-
-                async skipCard() {
-                    if (!this.currentCard || this.submitting) return;
-
-                    this.submitting = true;
-
-                    try {
-                        const response = await fetch('/api/skip', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ card_id: this.currentCard.id })
-                        });
-
-                        if (response.ok) {
-                            this.loadNextCard();
-                        }
-                    } catch (e) {
-                        console.error('Failed to skip card:', e);
-                    } finally {
-                        this.submitting = false;
-                    }
-                },
-
-                // Notes methods
-                openNotesDrawer() {
-                    this.notesDrawerOpen = true;
-                    this.notesEditMode = false;
-                },
-
-                closeNotesDrawer() {
-                    this.notesDrawerOpen = false;
-                    this.notesEditMode = false;
-                    this.notesEditText = '';
-                },
-
-                enterNotesEditMode() {
-                    this.notesEditText = this.currentCard?.notes || '';
-                    this.notesEditMode = true;
-                },
-
-                cancelNotesEdit() {
-                    this.notesEditMode = false;
-                    this.notesEditText = '';
-                },
-
-                async saveNotes() {
-                    if (!this.currentCard || this.notesSaving) return;
-
-                    this.notesSaving = true;
-
-                    try {
-                        const response = await fetch(`/api/card/${this.currentCard.id}/notes`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ notes: this.notesEditText })
-                        });
-
-                        if (response.ok) {
-                            // Update local state
-                            this.currentCard.notes = this.notesEditText.trim() || null;
-                            this.notesEditMode = false;
-                        }
-                    } catch (e) {
-                        console.error('Failed to save notes:', e);
-                    } finally {
-                        this.notesSaving = false;
-                    }
-                },
-
-                renderMarkdown(text) {
-                    if (!text) return '';
-                    try {
-                        return marked.parse(text);
-                    } catch (e) {
-                        return text;
-                    }
-                }
-            };
-        }
-    </script>
 
     <!-- Service Worker Registration -->
     <script>
