@@ -12,9 +12,20 @@
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <!-- Local-first modules -->
-    <script type="module" src="/static/js/app.js"></script>
+    <!-- Local-first modules - load and register before Alpine starts -->
+    <script type="module">
+        import { cardResponse, learningApp } from '/static/js/app.js';
+
+        // Register components globally for Alpine
+        window.cardResponse = cardResponse;
+        window.learningApp = learningApp;
+
+        // Now dynamically load and start Alpine
+        const script = document.createElement('script');
+        script.src = 'https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js';
+        script.defer = true;
+        document.head.appendChild(script);
+    </script>
     <style>
         [x-cloak] { display: none !important; }
         body {
