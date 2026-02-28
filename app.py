@@ -742,6 +742,186 @@ def health():
         return f"DB Error: {e}", 500
 
 
+# ==========================================================
+# TEST ENDPOINTS - Staging only
+# ==========================================================
+
+def is_staging():
+    """Check if running on staging environment."""
+    fly_app = os.getenv("FLY_APP_NAME", "")
+    return "staging" in fly_app or os.getenv("ALLOW_TEST_ENDPOINTS") == "true"
+
+
+@app.route("/api/test/reset-client")
+def api_test_reset_client():
+    """Returns instructions for clearing client-side state."""
+    if not is_staging():
+        return jsonify({"error": "Not available"}), 404
+
+    return jsonify({
+        "success": True,
+        "instructions": [
+            "Open DevTools (F12 or Cmd+Option+I)",
+            "Go to Application tab",
+            "Click 'Clear site data' in Storage section",
+            "Or: IndexedDB → right-click 'sociology-learning' → Delete database",
+            "Reload the page"
+        ],
+        "note": "This endpoint cannot clear client-side storage directly - it must be done in the browser."
+    })
+
+
+@app.route("/api/test/seed-cards")
+def api_test_seed_cards():
+    """Add test cards for testing purposes."""
+    if not is_staging():
+        return jsonify({"error": "Not available"}), 404
+
+    count = request.args.get("count", 3, type=int)
+    count = min(count, 10)  # Limit to 10 cards
+
+    test_cards = [
+        {
+            "semantic_description": "Test card: Multiple choice question about sociology",
+            "card_html": '''<div x-data="cardResponse()" class="p-4">
+    <div x-data="{ selected: null }">
+        <p class="text-gray-600 text-sm mb-2">Testfrage</p>
+        <h2 class="text-lg font-semibold mb-4">Was ist ein soziales System?</h2>
+        <div class="space-y-2">
+            <label class="flex items-center p-3 border rounded-lg cursor-pointer" :class="selected === 'a' ? 'border-indigo-500 bg-indigo-50' : 'border-gray-300'">
+                <input type="radio" x-model="selected" value="a" class="mr-3"> Ein Computer-Netzwerk
+            </label>
+            <label class="flex items-center p-3 border rounded-lg cursor-pointer" :class="selected === 'b' ? 'border-indigo-500 bg-indigo-50' : 'border-gray-300'">
+                <input type="radio" x-model="selected" value="b" class="mr-3"> Eine Gruppe von Menschen mit Interaktionen
+            </label>
+            <label class="flex items-center p-3 border rounded-lg cursor-pointer" :class="selected === 'c' ? 'border-indigo-500 bg-indigo-50' : 'border-gray-300'">
+                <input type="radio" x-model="selected" value="c" class="mr-3"> Ein politisches Gebilde
+            </label>
+        </div>
+        <button @click="submitResponse({ answer: selected })" :disabled="!selected || submitting"
+                class="mt-4 w-full py-3 bg-indigo-600 text-white rounded-lg font-medium disabled:opacity-50">
+            <span x-show="!submitting">Antwort senden</span>
+            <span x-show="submitting">Wird gesendet...</span>
+        </button>
+    </div>
+</div>''',
+            "response_schema": {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+        },
+        {
+            "semantic_description": "Test card: Free text question about norms",
+            "card_html": '''<div x-data="cardResponse()" class="p-4">
+    <div x-data="{ answer: '' }">
+        <p class="text-gray-600 text-sm mb-2">Testfrage</p>
+        <h2 class="text-lg font-semibold mb-4">Erkläre den Begriff "soziale Norm" in eigenen Worten.</h2>
+        <textarea x-model="answer" class="w-full p-3 border border-gray-300 rounded-lg" rows="4" placeholder="Deine Antwort..."></textarea>
+        <button @click="submitResponse({ answer })" :disabled="answer.trim().length < 10 || submitting"
+                class="mt-4 w-full py-3 bg-indigo-600 text-white rounded-lg font-medium disabled:opacity-50">
+            <span x-show="!submitting">Antwort senden</span>
+            <span x-show="submitting">Wird gesendet...</span>
+        </button>
+    </div>
+</div>''',
+            "response_schema": {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+        },
+        {
+            "semantic_description": "Test card: Self-assessment question",
+            "card_html": '''<div x-data="cardResponse()" class="p-4">
+    <div x-data="{ confidence: 3 }">
+        <p class="text-gray-600 text-sm mb-2">Selbsteinschätzung</p>
+        <h2 class="text-lg font-semibold mb-4">Wie gut verstehst du den Unterschied zwischen Rolle und Status?</h2>
+        <div class="flex justify-between mb-4">
+            <template x-for="i in 5">
+                <button @click="confidence = i" class="w-12 h-12 rounded-full border-2 text-lg font-semibold"
+                        :class="confidence === i ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-300'">
+                    <span x-text="i"></span>
+                </button>
+            </template>
+        </div>
+        <p class="text-sm text-gray-500 text-center mb-4">1 = gar nicht, 5 = sehr gut</p>
+        <button @click="submitResponse({ confidence })" :disabled="submitting"
+                class="mt-4 w-full py-3 bg-indigo-600 text-white rounded-lg font-medium disabled:opacity-50">
+            <span x-show="!submitting">Antwort senden</span>
+            <span x-show="submitting">Wird gesendet...</span>
+        </button>
+    </div>
+</div>''',
+            "response_schema": {"type": "object", "properties": {"confidence": {"type": "integer"}}, "required": ["confidence"]}
+        }
+    ]
+
+    cards_added = 0
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for i in range(count):
+                card = test_cards[i % len(test_cards)]
+                cur.execute(
+                    """INSERT INTO cards (semantic_description, card_html, response_schema, visibility, card_type)
+                       VALUES (%s, %s, %s, 'public', 'learning')""",
+                    (f"{card['semantic_description']} (test #{i+1})", card['card_html'], json.dumps(card['response_schema']))
+                )
+                cards_added += 1
+        conn.commit()
+
+    return jsonify({
+        "success": True,
+        "cards_added": cards_added,
+        "message": f"Added {cards_added} test cards"
+    })
+
+
+@app.route("/api/test/clear-responses")
+def api_test_clear_responses():
+    """Clear responses for a device token."""
+    if not is_staging():
+        return jsonify({"error": "Not available"}), 404
+
+    device_token = request.args.get("device_token")
+    if not device_token:
+        return jsonify({"error": "Missing device_token parameter"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Delete feedback first (foreign key)
+            cur.execute("DELETE FROM feedback WHERE device_token = %s", (device_token,))
+            # Delete responses
+            cur.execute("DELETE FROM responses WHERE device_token = %s", (device_token,))
+            deleted = cur.rowcount
+        conn.commit()
+
+    return jsonify({
+        "success": True,
+        "responses_deleted": deleted
+    })
+
+
+@app.route("/api/test/db-state")
+def api_test_db_state():
+    """Get current database state for debugging."""
+    if not is_staging():
+        return jsonify({"error": "Not available"}), 404
+
+    device_token = request.args.get("device_token")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM cards")
+            cards_count = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM responses")
+            responses_count = cur.fetchone()[0]
+
+            device_responses = 0
+            if device_token:
+                cur.execute("SELECT COUNT(*) FROM responses WHERE device_token = %s", (device_token,))
+                device_responses = cur.fetchone()[0]
+
+    return jsonify({
+        "cards_count": cards_count,
+        "responses_count": responses_count,
+        "device_responses": device_responses
+    })
+
+
 # Template filter to mark HTML as safe
 @app.template_filter('safe_html')
 def safe_html(s):
