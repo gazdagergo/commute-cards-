@@ -109,8 +109,16 @@ export function learningApp() {
         submitting: false,
         successMessage: '',
 
-        // Stats
-        stats: null,
+        // Stats (initialized with defaults to prevent null errors during render)
+        stats: {
+            total_cards: 0,
+            completed_today: 0,
+            total_completed: 0,
+            scheduled: 0,
+            new_cards: 0,
+            skipped: 0,
+            remaining: 0
+        },
 
         // Sync state (bound to sync module)
         syncState: sync.syncState,
