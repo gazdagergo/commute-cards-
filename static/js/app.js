@@ -259,6 +259,9 @@ export function learningApp() {
 
             const result = await sync.performSync();
 
+            // Force Alpine to detect syncState changes by creating new object reference
+            this.syncState = { ...sync.syncState };
+
             if (result.success) {
                 console.log(`Sync complete: sent ${result.responses_sent}, received ${result.cards_received}`);
                 // Refresh stats and potentially the current card
@@ -283,9 +286,27 @@ export function learningApp() {
 
         /**
          * Get formatted last sync time
+         * Note: Uses this.syncState directly for Alpine reactivity
          */
         getLastSyncText() {
-            return sync.formatLastSync();
+            const lastSyncTime = this.syncState.lastSyncTime;
+            if (!lastSyncTime) {
+                return 'Never synced';
+            }
+
+            const syncDate = new Date(lastSyncTime);
+            const now = new Date();
+            const diffMs = now - syncDate;
+            const diffMins = Math.floor(diffMs / 60000);
+            const diffHours = Math.floor(diffMs / 3600000);
+            const diffDays = Math.floor(diffMs / 86400000);
+
+            if (diffMins < 1) return 'Just now';
+            if (diffMins < 60) return `${diffMins}m ago`;
+            if (diffHours < 24) return `${diffHours}h ago`;
+            if (diffDays < 7) return `${diffDays}d ago`;
+
+            return syncDate.toLocaleDateString('de-DE');
         },
 
         // =================================================================
