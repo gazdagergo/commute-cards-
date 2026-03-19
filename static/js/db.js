@@ -15,6 +15,10 @@ const DB_VERSION = 1;
 
 let dbInstance = null;
 
+// Session tracking - cards completed this session won't immediately reappear
+// This resets on page refresh
+const sessionCompletedCards = new Set();
+
 /**
  * Open/create the database
  */
@@ -264,10 +268,18 @@ export async function markCompleted(cardId, scheduleType = 'never', scheduleDays
         scheduled_for = futureDate.toISOString().split('T')[0];
     }
 
+    // Get existing progress to increment response_count
+    const existing = await getProgress(cardId);
+    const response_count = (existing?.response_count || 0) + 1;
+
+    // Track in session to prevent immediate re-showing
+    sessionCompletedCards.add(cardId);
+
     return updateProgress(cardId, {
         status: scheduled_for ? 'scheduled' : 'completed',
         completed_at: now.toISOString(),
-        scheduled_for
+        scheduled_for,
+        response_count
     });
 }
 
@@ -308,7 +320,12 @@ export async function getDueCardIds() {
 }
 
 /**
- * Get next card to study (prioritizes: due > new > skipped)
+ * Get next card to study
+ * Priority order:
+ * 1. New cards (never seen) - these always come first
+ * 2. Due cards sorted by response_count ascending (least seen first)
+ *    - Cards completed this session go to the end
+ * 3. Skipped cards
  */
 export async function getNextCard() {
     const cards = await getAllCards();
@@ -323,6 +340,7 @@ export async function getNextCard() {
 
     // Categorize cards
     const due = [];
+    const dueCompletedThisSession = [];
     const newCards = [];
     const skipped = [];
 
@@ -332,19 +350,51 @@ export async function getNextCard() {
         if (!progress) {
             newCards.push(card);
         } else if (progress.status === 'scheduled' && progress.scheduled_for && progress.scheduled_for <= today) {
-            due.push(card);
+            // Separate cards completed this session from others
+            if (sessionCompletedCards.has(card.id)) {
+                dueCompletedThisSession.push({ card, response_count: progress.response_count || 0 });
+            } else {
+                due.push({ card, response_count: progress.response_count || 0 });
+            }
         } else if (progress.status === 'skipped') {
             skipped.push(card);
         }
         // completed cards without schedule are not returned
     }
 
-    // Return in priority order
-    if (due.length > 0) return due[0];
+    // Sort due cards by response_count (ascending - least seen first)
+    due.sort((a, b) => a.response_count - b.response_count);
+    dueCompletedThisSession.sort((a, b) => a.response_count - b.response_count);
+
+    // Return in priority order:
+    // 1. New cards first (never seen)
     if (newCards.length > 0) return newCards[0];
+
+    // 2. Due cards not completed this session (sorted by response_count)
+    if (due.length > 0) return due[0].card;
+
+    // 3. Skipped cards
     if (skipped.length > 0) return skipped[0];
 
+    // 4. Due cards completed this session (only if nothing else available)
+    if (dueCompletedThisSession.length > 0) return dueCompletedThisSession[0].card;
+
     return null;
+}
+
+/**
+ * Clear session tracking (allows completed cards to appear again)
+ * Call this if user wants to review cards they already did this session
+ */
+export function clearSessionTracking() {
+    sessionCompletedCards.clear();
+}
+
+/**
+ * Get the number of cards completed this session
+ */
+export function getSessionCompletedCount() {
+    return sessionCompletedCards.size;
 }
 
 /**
