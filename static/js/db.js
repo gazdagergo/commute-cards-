@@ -11,7 +11,7 @@
  */
 
 const DB_NAME = 'sociology-learning';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbInstance = null;
 
@@ -81,6 +81,11 @@ export async function openDB() {
                 });
                 syncStore.createIndex('synced_at', 'synced_at', { unique: false });
             }
+
+            // Drafts store - save work in progress (v2)
+            if (!db.objectStoreNames.contains('drafts')) {
+                db.createObjectStore('drafts', { keyPath: 'card_id' });
+            }
         };
     });
 }
@@ -145,6 +150,56 @@ export async function setLastSync(timestamp) {
 }
 
 // =============================================================================
+// COURSE SUBSCRIPTIONS
+// =============================================================================
+
+// Default courses - only sociology enabled by default
+// ML courses require explicit opt-in
+const DEFAULT_SUBSCRIBED_COURSES = ['sociology'];
+
+/**
+ * Get subscribed course slugs
+ * Returns default if not set
+ */
+export async function getSubscribedCourses() {
+    const stored = await getConfig('subscribed_courses');
+    if (stored === undefined || stored === null) {
+        return DEFAULT_SUBSCRIBED_COURSES;
+    }
+    return stored;
+}
+
+/**
+ * Set subscribed course slugs
+ */
+export async function setSubscribedCourses(courseSlugs) {
+    return await setConfig('subscribed_courses', courseSlugs);
+}
+
+/**
+ * Check if a course is subscribed
+ */
+export async function isCourseSubscribed(courseSlug) {
+    const subscribed = await getSubscribedCourses();
+    return subscribed.includes(courseSlug);
+}
+
+/**
+ * Toggle course subscription
+ */
+export async function toggleCourseSubscription(courseSlug) {
+    const subscribed = await getSubscribedCourses();
+    const index = subscribed.indexOf(courseSlug);
+    if (index >= 0) {
+        subscribed.splice(index, 1);
+    } else {
+        subscribed.push(courseSlug);
+    }
+    await setSubscribedCourses(subscribed);
+    return subscribed;
+}
+
+// =============================================================================
 // CARDS OPERATIONS
 // =============================================================================
 
@@ -204,6 +259,20 @@ export async function getCardCount() {
         const store = tx.objectStore('cards');
         const request = store.count();
         request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Clear all cards (used when changing subscriptions)
+ */
+export async function clearCards() {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('cards', 'readwrite');
+        const store = tx.objectStore('cards');
+        const request = store.clear();
+        request.onsuccess = () => resolve();
         request.onerror = () => reject(request.error);
     });
 }
@@ -489,6 +558,65 @@ export async function saveNotes(cardId, content) {
             request.onerror = () => reject(request.error);
         }
     });
+}
+
+// =============================================================================
+// DRAFTS OPERATIONS
+// =============================================================================
+
+/**
+ * Save a draft for a card
+ * formData is an object with input values keyed by name or index
+ */
+export async function saveDraft(cardId, formData) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('drafts', 'readwrite');
+        const store = tx.objectStore('drafts');
+        const request = store.put({
+            card_id: cardId,
+            form_data: formData,
+            saved_at: new Date().toISOString()
+        });
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Get draft for a card
+ */
+export async function getDraft(cardId) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('drafts', 'readonly');
+        const store = tx.objectStore('drafts');
+        const request = store.get(cardId);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Clear draft for a card (after submission)
+ */
+export async function clearDraft(cardId) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('drafts', 'readwrite');
+        const store = tx.objectStore('drafts');
+        const request = store.delete(cardId);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Check if a card has a draft
+ */
+export async function hasDraft(cardId) {
+    const draft = await getDraft(cardId);
+    return draft !== null;
 }
 
 // =============================================================================

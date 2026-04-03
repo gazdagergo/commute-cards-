@@ -140,12 +140,25 @@ export function learningApp() {
         notesEditText: '',
         notesSaving: false,
 
+        // Settings state
+        settingsOpen: false,
+        availableCourses: [],
+        subscribedCourses: [],
+
+        // Draft state
+        currentDraft: null,
+        savingDraft: false,
+
         /**
          * Initialize on mount
          */
         async init() {
             await initApp();
             this.initialized = true;
+
+            // Load subscribed courses
+            this.subscribedCourses = await db.getSubscribedCourses();
+
             await this.loadNextCard();
         },
 
@@ -157,15 +170,23 @@ export function learningApp() {
             this.showFeedback = false;
             this.resetFeedback();
             this.closeNotesDrawer();
+            this.currentDraft = null;
 
             try {
                 // Get next card from local database
                 const card = await db.getNextCard();
 
                 if (card) {
-                    // Load notes for this card
+                    // Load notes and draft for this card
                     const notes = await db.getNotes(card.id);
+                    const draft = await db.getDraft(card.id);
                     this.currentCard = { ...card, notes };
+                    this.currentDraft = draft;
+
+                    // If there's a draft, restore it after DOM updates
+                    if (draft) {
+                        this.$nextTick(() => this.restoreDraft());
+                    }
                 } else {
                     this.currentCard = null;
                 }
@@ -195,10 +216,16 @@ export function learningApp() {
         /**
          * Called when a card response is submitted
          */
-        onCardSubmitted(message, localId) {
+        async onCardSubmitted(message, localId) {
             this.successMessage = message || 'Gespeichert';
             this.currentLocalId = localId;
             this.showFeedback = true;
+
+            // Clear draft since the card was submitted
+            if (this.currentCard) {
+                await db.clearDraft(this.currentCard.id);
+                this.currentDraft = null;
+            }
         },
 
         /**
@@ -358,6 +385,174 @@ export function learningApp() {
             } catch (e) {
                 return text;
             }
+        },
+
+        // =================================================================
+        // Settings methods
+        // =================================================================
+
+        async openSettings() {
+            this.settingsOpen = true;
+
+            // Fetch available courses from server
+            try {
+                const response = await fetch('/api/courses');
+                if (response.ok) {
+                    const data = await response.json();
+                    this.availableCourses = data.courses || [];
+                }
+            } catch (e) {
+                console.error('Failed to fetch courses:', e);
+            }
+        },
+
+        closeSettings() {
+            this.settingsOpen = false;
+        },
+
+        async toggleCourse(slug) {
+            // Toggle in local state
+            const index = this.subscribedCourses.indexOf(slug);
+            if (index >= 0) {
+                this.subscribedCourses.splice(index, 1);
+            } else {
+                this.subscribedCourses.push(slug);
+            }
+
+            // Persist to IndexedDB
+            await db.setSubscribedCourses([...this.subscribedCourses]);
+
+            // Clear local cards and re-fetch based on new subscriptions
+            await this.refreshCardsForSubscriptions();
+        },
+
+        async refreshCardsForSubscriptions() {
+            // Clear existing cards from IndexedDB
+            await db.clearCards();
+
+            // Fetch new cards based on current subscriptions
+            if (sync.syncState.isOnline) {
+                await sync.fetchInitialCards();
+            }
+
+            // Reload current card
+            await this.loadNextCard();
+        },
+
+        // =================================================================
+        // Draft methods
+        // =================================================================
+
+        /**
+         * Capture current form state from card inputs
+         */
+        captureFormState() {
+            const cardContainer = document.getElementById('card-content');
+            if (!cardContainer) return null;
+
+            const formData = {};
+            let hasContent = false;
+
+            // Capture all input values
+            const inputs = cardContainer.querySelectorAll('input, textarea, select');
+            inputs.forEach((input, index) => {
+                const key = input.name || `input_${index}`;
+
+                if (input.type === 'radio') {
+                    if (input.checked) {
+                        formData[input.name] = input.value;
+                        hasContent = true;
+                    }
+                } else if (input.type === 'checkbox') {
+                    if (!formData[key]) formData[key] = [];
+                    if (input.checked) {
+                        formData[key].push(input.value);
+                        hasContent = true;
+                    }
+                } else {
+                    const value = input.value?.trim();
+                    if (value) {
+                        formData[key] = value;
+                        hasContent = true;
+                    }
+                }
+            });
+
+            return hasContent ? formData : null;
+        },
+
+        /**
+         * Restore draft values to form inputs
+         */
+        restoreDraft() {
+            if (!this.currentDraft?.form_data) return;
+
+            const cardContainer = document.getElementById('card-content');
+            if (!cardContainer) return;
+
+            const formData = this.currentDraft.form_data;
+
+            // Restore values to inputs
+            const inputs = cardContainer.querySelectorAll('input, textarea, select');
+            inputs.forEach((input, index) => {
+                const key = input.name || `input_${index}`;
+
+                if (input.type === 'radio') {
+                    if (formData[input.name] === input.value) {
+                        input.checked = true;
+                        // Trigger change event for Alpine reactivity
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                } else if (input.type === 'checkbox') {
+                    const values = formData[key] || [];
+                    if (values.includes(input.value)) {
+                        input.checked = true;
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                } else if (formData[key]) {
+                    input.value = formData[key];
+                    // Trigger input event for Alpine reactivity
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            });
+
+            console.log('Draft restored for card', this.currentCard?.id);
+        },
+
+        /**
+         * Save current work as draft and move to next card
+         */
+        async saveDraftAndContinue() {
+            if (!this.currentCard || this.savingDraft) return;
+
+            this.savingDraft = true;
+
+            try {
+                const formData = this.captureFormState();
+
+                if (formData) {
+                    await db.saveDraft(this.currentCard.id, formData);
+                    console.log('Draft saved for card', this.currentCard.id);
+                }
+
+                // Move to next card (draft cards will come back later)
+                await this.loadNextCard();
+
+            } catch (e) {
+                console.error('Failed to save draft:', e);
+            } finally {
+                this.savingDraft = false;
+            }
+        },
+
+        /**
+         * Clear draft for current card
+         */
+        async clearCurrentDraft() {
+            if (!this.currentCard) return;
+
+            await db.clearDraft(this.currentCard.id);
+            this.currentDraft = null;
         }
     };
 }

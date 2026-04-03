@@ -16,7 +16,8 @@ import {
     clearPendingResponses,
     logSync,
     getCardCount,
-    getPendingCount
+    getPendingCount,
+    getSubscribedCourses
 } from './db.js';
 
 const API_BASE = '';  // Same origin
@@ -64,6 +65,7 @@ export async function updatePendingCount() {
 
 /**
  * Fetch initial cards (first load or cache refresh)
+ * Only fetches cards from subscribed courses
  */
 export async function fetchInitialCards() {
     if (!syncState.isOnline) {
@@ -73,7 +75,15 @@ export async function fetchInitialCards() {
 
     try {
         const deviceToken = await getOrCreateDeviceToken();
-        const response = await fetch(`${API_BASE}/api/cards?device_token=${encodeURIComponent(deviceToken)}`);
+        const subscribedCourses = await getSubscribedCourses();
+
+        // Build URL with course filter
+        let url = `${API_BASE}/api/cards?device_token=${encodeURIComponent(deviceToken)}`;
+        if (subscribedCourses.length > 0) {
+            url += `&courses=${encodeURIComponent(subscribedCourses.join(','))}`;
+        }
+
+        const response = await fetch(url);
 
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -84,7 +94,7 @@ export async function fetchInitialCards() {
 
         if (cards.length > 0) {
             await saveCards(cards);
-            console.log(`Cached ${cards.length} cards`);
+            console.log(`Cached ${cards.length} cards from courses: ${subscribedCourses.join(', ')}`);
         }
 
         return { success: true, count: cards.length };
@@ -119,6 +129,7 @@ export async function performSync() {
         const deviceToken = await getOrCreateDeviceToken();
         const lastSync = await getLastSync();
         const pendingResponses = await getPendingResponses();
+        const subscribedCourses = await getSubscribedCourses();
 
         // Build sync request
         const syncRequest = {
@@ -129,10 +140,11 @@ export async function performSync() {
                 responded_at: r.responded_at,
                 feedback: r.feedback
             })),
-            last_sync: lastSync
+            last_sync: lastSync,
+            subscribed_courses: subscribedCourses
         };
 
-        console.log(`Syncing: ${pendingResponses.length} responses to upload`);
+        console.log(`Syncing: ${pendingResponses.length} responses, courses: ${subscribedCourses.join(', ')}`);
 
         const response = await fetch(`${API_BASE}/api/sync`, {
             method: 'POST',

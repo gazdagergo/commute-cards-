@@ -202,6 +202,62 @@ def init_db():
                 END $$;
             """)
 
+            # ==========================================================
+            # COURSES - Course filtering system
+            # ==========================================================
+            print("Creating courses table...", file=sys.stderr)
+
+            # Courses table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS courses (
+                    id SERIAL PRIMARY KEY,
+                    slug VARCHAR(64) UNIQUE NOT NULL,
+                    name VARCHAR(255) NOT NULL,
+                    description TEXT
+                )
+            """)
+
+            # Migration: Add course_id column to cards
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'cards' AND column_name = 'course_id'
+                    ) THEN
+                        ALTER TABLE cards ADD COLUMN course_id INTEGER REFERENCES courses(id);
+                    END IF;
+                END $$;
+            """)
+
+            # Seed default courses if they don't exist
+            cur.execute("""
+                INSERT INTO courses (slug, name, description)
+                VALUES ('sociology', 'Soziologie', 'Einführung in die Soziologie - Übungen A, B, C, etc.')
+                ON CONFLICT (slug) DO NOTHING
+            """)
+            cur.execute("""
+                INSERT INTO courses (slug, name, description)
+                VALUES ('ml-basics', 'ML Basics', 'Machine Learning fundamentals - Hello World Model')
+                ON CONFLICT (slug) DO NOTHING
+            """)
+
+            # Migrate existing cards to courses based on course_task_ref
+            # Cards with ml-* refs go to ml-basics, others go to sociology
+            cur.execute("""
+                UPDATE cards
+                SET course_id = (SELECT id FROM courses WHERE slug = 'ml-basics')
+                WHERE course_id IS NULL
+                  AND (course_task_ref LIKE 'ml-%' OR semantic_description LIKE 'ML %')
+            """)
+            cur.execute("""
+                UPDATE cards
+                SET course_id = (SELECT id FROM courses WHERE slug = 'sociology')
+                WHERE course_id IS NULL
+            """)
+
+            print("Courses setup done", file=sys.stderr)
+
             print("Migrations done, creating indexes...", file=sys.stderr)
 
             # ==========================================================
@@ -277,6 +333,32 @@ def index():
 # PUBLIC API - No authentication required
 # ==========================================================
 
+@app.route("/api/courses")
+def api_courses():
+    """Get available courses."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, slug, name, description
+                FROM courses
+                ORDER BY name ASC
+            """)
+            rows = cur.fetchall()
+
+            courses = []
+            for row in rows:
+                courses.append({
+                    "id": row[0],
+                    "slug": row[1],
+                    "name": row[2],
+                    "description": row[3]
+                })
+
+            return jsonify({
+                "courses": courses
+            })
+
+
 @app.route("/api/cards")
 def api_cards():
     """Get cards - public cards and optionally device-specific private cards.
@@ -284,9 +366,11 @@ def api_cards():
     Query params:
     - device_token: Include private cards for this device
     - since: Only cards created after this ISO timestamp
+    - courses: Comma-separated course slugs to filter by (e.g., "sociology,ml-basics")
     """
     device_token = request.args.get("device_token")
     since = request.args.get("since")
+    courses_param = request.args.get("courses")
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -294,31 +378,40 @@ def api_cards():
             if device_token:
                 # Return public cards + private cards for this device
                 query = """
-                    SELECT id, created_at, semantic_description, course_task_ref,
-                           card_html, response_schema, visibility, device_token,
-                           card_type, parent_response_id, generation_batch
-                    FROM cards
-                    WHERE visibility = 'public'
-                       OR device_token = %s
+                    SELECT c.id, c.created_at, c.semantic_description, c.course_task_ref,
+                           c.card_html, c.response_schema, c.visibility, c.device_token,
+                           c.card_type, c.parent_response_id, c.generation_batch, co.slug as course_slug
+                    FROM cards c
+                    LEFT JOIN courses co ON c.course_id = co.id
+                    WHERE (c.visibility = 'public' OR c.device_token = %s)
                 """
                 params = [device_token]
             else:
                 # Return only public cards
                 query = """
-                    SELECT id, created_at, semantic_description, course_task_ref,
-                           card_html, response_schema, visibility, device_token,
-                           card_type, parent_response_id, generation_batch
-                    FROM cards
-                    WHERE visibility = 'public'
+                    SELECT c.id, c.created_at, c.semantic_description, c.course_task_ref,
+                           c.card_html, c.response_schema, c.visibility, c.device_token,
+                           c.card_type, c.parent_response_id, c.generation_batch, co.slug as course_slug
+                    FROM cards c
+                    LEFT JOIN courses co ON c.course_id = co.id
+                    WHERE c.visibility = 'public'
                 """
                 params = []
 
+            # Filter by courses if provided
+            if courses_param:
+                course_slugs = [s.strip() for s in courses_param.split(",") if s.strip()]
+                if course_slugs:
+                    placeholders = ",".join(["%s"] * len(course_slugs))
+                    query += f" AND co.slug IN ({placeholders})"
+                    params.extend(course_slugs)
+
             # Filter by timestamp if provided
             if since:
-                query += " AND created_at > %s"
+                query += " AND c.created_at > %s"
                 params.append(since)
 
-            query += " ORDER BY created_at ASC"
+            query += " ORDER BY c.created_at ASC"
 
             cur.execute(query, params)
             rows = cur.fetchall()
@@ -336,7 +429,8 @@ def api_cards():
                     "device_token": row[7],
                     "card_type": row[8],
                     "parent_response_id": row[9],
-                    "generation_batch": row[10]
+                    "generation_batch": row[10],
+                    "course_slug": row[11]
                 })
 
             return jsonify({
@@ -437,7 +531,8 @@ def api_sync():
                 "feedback": { "rating": 4, "comment": "..." }  // optional
             }
         ],
-        "last_sync": "ISO timestamp" or null
+        "last_sync": "ISO timestamp" or null,
+        "subscribed_courses": ["sociology", "ml-basics"]  // optional, filter cards
     }
 
     Response:
@@ -460,6 +555,7 @@ def api_sync():
     device_token = data.get("device_token")
     responses = data.get("responses", [])
     last_sync = data.get("last_sync")
+    subscribed_courses = data.get("subscribed_courses")  # List of course slugs
 
     if not device_token:
         return jsonify({"error": "Missing device_token"}), 400
@@ -504,29 +600,33 @@ def api_sync():
                         feedback.get("comment")
                     ))
 
-            # Get new cards since last sync
-            if last_sync:
-                cur.execute("""
-                    SELECT id, created_at, semantic_description, course_task_ref,
-                           card_html, response_schema, visibility, device_token,
-                           card_type, parent_response_id, generation_batch
-                    FROM cards
-                    WHERE (visibility = 'public' OR device_token = %s)
-                      AND created_at > %s
-                    ORDER BY created_at ASC
-                """, (device_token, last_sync))
-            else:
-                # First sync - get all available cards
-                cur.execute("""
-                    SELECT id, created_at, semantic_description, course_task_ref,
-                           card_html, response_schema, visibility, device_token,
-                           card_type, parent_response_id, generation_batch
-                    FROM cards
-                    WHERE visibility = 'public' OR device_token = %s
-                    ORDER BY created_at ASC
-                """, (device_token,))
+            # Build query for new cards with optional course filtering
+            query = """
+                SELECT c.id, c.created_at, c.semantic_description, c.course_task_ref,
+                       c.card_html, c.response_schema, c.visibility, c.device_token,
+                       c.card_type, c.parent_response_id, c.generation_batch, co.slug as course_slug
+                FROM cards c
+                LEFT JOIN courses co ON c.course_id = co.id
+                WHERE (c.visibility = 'public' OR c.device_token = %s)
+            """
+            params = [device_token]
 
+            # Filter by subscribed courses if provided
+            if subscribed_courses and isinstance(subscribed_courses, list) and len(subscribed_courses) > 0:
+                placeholders = ",".join(["%s"] * len(subscribed_courses))
+                query += f" AND co.slug IN ({placeholders})"
+                params.extend(subscribed_courses)
+
+            # Filter by timestamp if provided
+            if last_sync:
+                query += " AND c.created_at > %s"
+                params.append(last_sync)
+
+            query += " ORDER BY c.created_at ASC"
+
+            cur.execute(query, params)
             rows = cur.fetchall()
+
             new_cards = []
             for row in rows:
                 new_cards.append({
@@ -540,16 +640,29 @@ def api_sync():
                     "device_token": row[7],
                     "card_type": row[8],
                     "parent_response_id": row[9],
-                    "generation_batch": row[10]
+                    "generation_batch": row[10],
+                    "course_slug": row[11]
                 })
 
-            # Get stats for this device
-            cur.execute("""
-                SELECT
-                    (SELECT COUNT(*) FROM responses WHERE device_token = %s) as total_responses,
-                    (SELECT COUNT(*) FROM responses WHERE device_token = %s AND evaluated = FALSE) as pending_evaluations,
-                    (SELECT COUNT(*) FROM cards WHERE visibility = 'public' OR device_token = %s) as cards_available
-            """, (device_token, device_token, device_token))
+            # Get stats for this device (filtered by subscribed courses if provided)
+            if subscribed_courses and isinstance(subscribed_courses, list) and len(subscribed_courses) > 0:
+                placeholders = ",".join(["%s"] * len(subscribed_courses))
+                cur.execute(f"""
+                    SELECT
+                        (SELECT COUNT(*) FROM responses WHERE device_token = %s) as total_responses,
+                        (SELECT COUNT(*) FROM responses WHERE device_token = %s AND evaluated = FALSE) as pending_evaluations,
+                        (SELECT COUNT(*) FROM cards c
+                         LEFT JOIN courses co ON c.course_id = co.id
+                         WHERE (c.visibility = 'public' OR c.device_token = %s)
+                           AND co.slug IN ({placeholders})) as cards_available
+                """, (device_token, device_token, device_token, *subscribed_courses))
+            else:
+                cur.execute("""
+                    SELECT
+                        (SELECT COUNT(*) FROM responses WHERE device_token = %s) as total_responses,
+                        (SELECT COUNT(*) FROM responses WHERE device_token = %s AND evaluated = FALSE) as pending_evaluations,
+                        (SELECT COUNT(*) FROM cards WHERE visibility = 'public' OR device_token = %s) as cards_available
+                """, (device_token, device_token, device_token))
             stats_row = cur.fetchone()
 
         conn.commit()

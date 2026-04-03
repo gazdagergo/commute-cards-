@@ -81,6 +81,18 @@
                         <span x-text="stats.remaining"></span> offen
                     </span>
 
+                    <!-- Settings button -->
+                    <button @click="openSettings()"
+                            class="p-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-400 transition-colors"
+                            title="Einstellungen">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                    </button>
+
                     <!-- Sync button -->
                     <button @click="doSync()"
                             :disabled="syncState.isSyncing || !syncState.isOnline"
@@ -133,6 +145,12 @@
             <div x-show="!loading && currentCard && !showFeedback" x-cloak>
                 <!-- Card wrapper -->
                 <div class="bg-white rounded-xl shadow-sm overflow-hidden relative">
+                    <!-- Draft indicator badge -->
+                    <div x-show="currentDraft"
+                         class="absolute top-3 left-3 z-10 px-2 py-1 bg-amber-100 text-amber-700 text-xs font-medium rounded-full">
+                        Entwurf
+                    </div>
+
                     <!-- Notes icon -->
                     <button @click="openNotesDrawer()"
                             class="absolute top-3 right-3 z-10 p-2 rounded-full transition-colors"
@@ -148,8 +166,14 @@
                     <div id="card-content" x-html="currentCard?.card_html"></div>
                 </div>
 
-                <!-- Skip button -->
-                <div class="mt-4 text-center">
+                <!-- Action buttons -->
+                <div class="mt-4 flex justify-center gap-4">
+                    <button @click="saveDraftAndContinue()"
+                            :disabled="savingDraft"
+                            class="px-4 py-2 text-sm bg-amber-100 text-amber-700 rounded-lg hover:bg-amber-200 disabled:opacity-50 transition-colors">
+                        <span x-show="!savingDraft">Entwurf speichern</span>
+                        <span x-show="savingDraft">Speichert...</span>
+                    </button>
                     <button @click="skipCard()"
                             :disabled="submitting"
                             class="text-gray-500 text-sm hover:text-gray-700 disabled:opacity-50">
@@ -218,6 +242,58 @@
                                 Markdown wird unterstuetzt: **fett**, *kursiv*, # Ueberschrift, - Liste, `code`
                             </p>
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Drawer -->
+            <div x-show="settingsOpen" x-cloak class="fixed inset-0 z-50">
+                <!-- Backdrop -->
+                <div @click="closeSettings()"
+                     class="absolute inset-0 bg-black/50 transition-opacity"
+                     :class="settingsOpen ? 'opacity-100' : 'opacity-0'"></div>
+
+                <!-- Drawer -->
+                <div class="notes-drawer absolute bottom-0 left-0 right-0 bg-white rounded-t-2xl max-h-[80vh] flex flex-col"
+                     :class="settingsOpen ? 'open' : ''">
+                    <!-- Handle -->
+                    <div class="flex justify-center py-2">
+                        <div class="w-12 h-1 bg-gray-300 rounded-full"></div>
+                    </div>
+
+                    <!-- Header -->
+                    <div class="flex items-center justify-between px-4 pb-3 border-b">
+                        <h3 class="font-semibold text-gray-800">Einstellungen</h3>
+                        <button @click="closeSettings()"
+                                class="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-lg">
+                            Schliessen
+                        </button>
+                    </div>
+
+                    <!-- Content -->
+                    <div class="flex-1 overflow-y-auto p-4">
+                        <h4 class="font-medium text-gray-800 mb-3">Kurse</h4>
+                        <p class="text-sm text-gray-500 mb-4">Wähle aus welche Kurse dir angezeigt werden sollen:</p>
+
+                        <div class="space-y-3">
+                            <template x-for="course in availableCourses" :key="course.slug">
+                                <label class="flex items-center p-3 border rounded-lg cursor-pointer transition-colors"
+                                       :class="subscribedCourses.includes(course.slug) ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200'">
+                                    <input type="checkbox"
+                                           :checked="subscribedCourses.includes(course.slug)"
+                                           @change="toggleCourse(course.slug)"
+                                           class="w-5 h-5 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500">
+                                    <div class="ml-3">
+                                        <span class="font-medium text-gray-800" x-text="course.name"></span>
+                                        <p class="text-sm text-gray-500" x-text="course.description"></p>
+                                    </div>
+                                </label>
+                            </template>
+                        </div>
+
+                        <p class="text-xs text-gray-400 mt-4">
+                            Hinweis: Nach dem Ändern muss synchronisiert werden um neue Karten zu laden.
+                        </p>
                     </div>
                 </div>
             </div>
