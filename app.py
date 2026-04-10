@@ -680,6 +680,306 @@ def api_sync():
 
 
 # ==========================================================
+# TASK PAGES API - Standalone learning content
+# ==========================================================
+
+@app.route("/api/task-pages")
+def api_task_pages():
+    """List task pages with optional filters.
+
+    Query params:
+    - course: Filter by course slug
+    - device_token: Include status for this device (via header or param)
+    """
+    course_slug = request.args.get("course")
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Build query
+            query = """
+                SELECT tp.id, tp.created_at, tp.updated_at, tp.title, tp.description,
+                       tp.course_id, tp.topics, tp.estimated_duration_minutes,
+                       tp.difficulty, c.slug as course_slug
+                FROM task_pages tp
+                LEFT JOIN courses c ON tp.course_id = c.id
+                WHERE 1=1
+            """
+            params = []
+
+            if course_slug:
+                query += " AND c.slug = %s"
+                params.append(course_slug)
+
+            query += " ORDER BY tp.created_at DESC"
+
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+            task_pages = []
+            for row in rows:
+                page = {
+                    "id": row[0],
+                    "created_at": row[1].isoformat() if row[1] else None,
+                    "updated_at": row[2].isoformat() if row[2] else None,
+                    "title": row[3],
+                    "description": row[4],
+                    "course_id": row[5],
+                    "topics": row[6] or [],
+                    "estimated_duration_minutes": row[7],
+                    "difficulty": row[8],
+                    "course_slug": row[9]
+                }
+
+                # Get status for device if token provided
+                if device_token:
+                    cur.execute("""
+                        SELECT status, started_at, completed_at, updated_at
+                        FROM task_page_statuses
+                        WHERE task_page_id = %s AND device_token = %s
+                    """, (row[0], device_token))
+                    status_row = cur.fetchone()
+                    if status_row:
+                        page["status"] = {
+                            "status": status_row[0],
+                            "started_at": status_row[1].isoformat() if status_row[1] else None,
+                            "completed_at": status_row[2].isoformat() if status_row[2] else None,
+                            "updated_at": status_row[3].isoformat() if status_row[3] else None
+                        }
+                    else:
+                        page["status"] = {"status": "not_started"}
+
+                task_pages.append(page)
+
+            return jsonify({
+                "task_pages": task_pages,
+                "count": len(task_pages)
+            })
+
+
+@app.route("/api/task-pages/<task_page_id>")
+def api_task_page(task_page_id):
+    """Get a single task page with status.
+
+    Query params / Headers:
+    - device_token / X-Device-Token: Get status for this device
+    """
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT tp.id, tp.created_at, tp.updated_at, tp.title, tp.description,
+                       tp.page_html, tp.course_id, tp.topics, tp.estimated_duration_minutes,
+                       tp.difficulty, tp.generation_batch, c.slug as course_slug
+                FROM task_pages tp
+                LEFT JOIN courses c ON tp.course_id = c.id
+                WHERE tp.id = %s
+            """, (task_page_id,))
+            row = cur.fetchone()
+
+            if not row:
+                return jsonify({"error": "Task page not found"}), 404
+
+            page = {
+                "id": row[0],
+                "created_at": row[1].isoformat() if row[1] else None,
+                "updated_at": row[2].isoformat() if row[2] else None,
+                "title": row[3],
+                "description": row[4],
+                "has_html": bool(row[5]),  # Don't include full HTML here
+                "course_id": row[6],
+                "topics": row[7] or [],
+                "estimated_duration_minutes": row[8],
+                "difficulty": row[9],
+                "generation_batch": row[10],
+                "course_slug": row[11]
+            }
+
+            # Get status for device if token provided
+            if device_token:
+                cur.execute("""
+                    SELECT status, started_at, completed_at, updated_at, notes
+                    FROM task_page_statuses
+                    WHERE task_page_id = %s AND device_token = %s
+                """, (task_page_id, device_token))
+                status_row = cur.fetchone()
+                if status_row:
+                    page["status"] = {
+                        "status": status_row[0],
+                        "started_at": status_row[1].isoformat() if status_row[1] else None,
+                        "completed_at": status_row[2].isoformat() if status_row[2] else None,
+                        "updated_at": status_row[3].isoformat() if status_row[3] else None,
+                        "notes": status_row[4]
+                    }
+                else:
+                    page["status"] = {"status": "not_started"}
+
+                # Check if evaluation exists
+                cur.execute("""
+                    SELECT COUNT(*) FROM task_page_responses
+                    WHERE task_page_id = %s AND device_token = %s AND evaluation IS NOT NULL
+                """, (task_page_id, device_token))
+                page["has_evaluation"] = cur.fetchone()[0] > 0
+
+            return jsonify(page)
+
+
+@app.route("/api/task-pages/<task_page_id>/html")
+def api_task_page_html(task_page_id):
+    """Get raw HTML for a task page (for iframe rendering).
+
+    This returns just the HTML content, not JSON.
+    The PWA will inject device_token before rendering.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT page_html FROM task_pages WHERE id = %s
+            """, (task_page_id,))
+            row = cur.fetchone()
+
+            if not row:
+                return "Task page not found", 404
+
+            return row[0], 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/api/task-pages/<task_page_id>/status", methods=["GET", "POST"])
+def api_task_page_status(task_page_id):
+    """Get or update status for a task page.
+
+    GET: Returns current status for device
+    POST: Updates status
+
+    Headers:
+    - X-Device-Token: Required
+
+    POST body:
+    {
+        "status": "not_started" | "draft" | "in_progress" | "completed",
+        "notes": "optional notes"
+    }
+    """
+    device_token = request.headers.get("X-Device-Token")
+    if not device_token:
+        return jsonify({"error": "Missing X-Device-Token header"}), 401
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify task page exists
+            cur.execute("SELECT id FROM task_pages WHERE id = %s", (task_page_id,))
+            if not cur.fetchone():
+                return jsonify({"error": "Task page not found"}), 404
+
+            if request.method == "GET":
+                cur.execute("""
+                    SELECT status, started_at, completed_at, updated_at, notes
+                    FROM task_page_statuses
+                    WHERE task_page_id = %s AND device_token = %s
+                """, (task_page_id, device_token))
+                row = cur.fetchone()
+
+                if row:
+                    return jsonify({
+                        "status": row[0],
+                        "started_at": row[1].isoformat() if row[1] else None,
+                        "completed_at": row[2].isoformat() if row[2] else None,
+                        "updated_at": row[3].isoformat() if row[3] else None,
+                        "notes": row[4]
+                    })
+                else:
+                    return jsonify({"status": "not_started"})
+
+            else:  # POST
+                data = request.get_json()
+                if not data:
+                    return jsonify({"error": "No data provided"}), 400
+
+                new_status = data.get("status")
+                notes = data.get("notes")
+
+                valid_statuses = ["not_started", "draft", "in_progress", "completed"]
+                if new_status and new_status not in valid_statuses:
+                    return jsonify({"error": f"Invalid status. Must be one of: {valid_statuses}"}), 400
+
+                # Check if status record exists
+                cur.execute("""
+                    SELECT id, status FROM task_page_statuses
+                    WHERE task_page_id = %s AND device_token = %s
+                """, (task_page_id, device_token))
+                existing = cur.fetchone()
+
+                now = datetime.utcnow()
+
+                if existing:
+                    # Update existing status
+                    update_fields = ["updated_at = %s"]
+                    update_params = [now]
+
+                    if new_status:
+                        update_fields.append("status = %s")
+                        update_params.append(new_status)
+
+                        # Set timestamps based on status transitions
+                        old_status = existing[1]
+                        if new_status in ["draft", "in_progress"] and old_status == "not_started":
+                            update_fields.append("started_at = %s")
+                            update_params.append(now)
+                        if new_status == "completed":
+                            update_fields.append("completed_at = %s")
+                            update_params.append(now)
+
+                    if notes is not None:
+                        update_fields.append("notes = %s")
+                        update_params.append(notes)
+
+                    update_params.append(existing[0])
+                    cur.execute(f"""
+                        UPDATE task_page_statuses
+                        SET {", ".join(update_fields)}
+                        WHERE id = %s
+                    """, update_params)
+                else:
+                    # Create new status record
+                    started_at = now if new_status in ["draft", "in_progress", "completed"] else None
+                    completed_at = now if new_status == "completed" else None
+
+                    cur.execute("""
+                        INSERT INTO task_page_statuses
+                        (task_page_id, device_token, status, started_at, completed_at, updated_at, notes)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        task_page_id,
+                        device_token,
+                        new_status or "not_started",
+                        started_at,
+                        completed_at,
+                        now,
+                        notes
+                    ))
+
+                conn.commit()
+
+                # Return updated status
+                cur.execute("""
+                    SELECT status, started_at, completed_at, updated_at, notes
+                    FROM task_page_statuses
+                    WHERE task_page_id = %s AND device_token = %s
+                """, (task_page_id, device_token))
+                row = cur.fetchone()
+
+                return jsonify({
+                    "success": True,
+                    "status": row[0],
+                    "started_at": row[1].isoformat() if row[1] else None,
+                    "completed_at": row[2].isoformat() if row[2] else None,
+                    "updated_at": row[3].isoformat() if row[3] else None,
+                    "notes": row[4]
+                })
+
+
+# ==========================================================
 # LEGACY API - For backwards compatibility during transition
 # These endpoints will be removed after full migration to local-first
 # ==========================================================
