@@ -979,6 +979,172 @@ def api_task_page_status(task_page_id):
                 })
 
 
+@app.route("/api/task-pages/<task_page_id>/response", methods=["POST"])
+def task_page_submit_response(task_page_id):
+    """Submit a response for a task page."""
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+    if not device_token:
+        return jsonify({"error": "Device token required"}), 401
+
+    data = request.get_json()
+    if not data or "response_content" not in data:
+        return jsonify({"error": "response_content is required"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify task page exists
+            cur.execute("SELECT id FROM task_pages WHERE id = %s", (task_page_id,))
+            if not cur.fetchone():
+                return jsonify({"error": "Task page not found"}), 404
+
+            # Insert response
+            cur.execute("""
+                INSERT INTO task_page_responses
+                (task_page_id, device_token, response_content)
+                VALUES (%s, %s, %s)
+                RETURNING id, submitted_at
+            """, (task_page_id, device_token, json.dumps(data["response_content"])))
+            row = cur.fetchone()
+            conn.commit()
+
+            return jsonify({
+                "success": True,
+                "response_id": row[0],
+                "submitted_at": row[1].isoformat() if row[1] else None
+            })
+
+
+@app.route("/api/task-pages/<task_page_id>/responses", methods=["GET"])
+def task_page_get_responses(task_page_id):
+    """Get all responses for a task page for the current device."""
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+    if not device_token:
+        return jsonify({"error": "Device token required"}), 401
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify task page exists
+            cur.execute("SELECT id FROM task_pages WHERE id = %s", (task_page_id,))
+            if not cur.fetchone():
+                return jsonify({"error": "Task page not found"}), 404
+
+            cur.execute("""
+                SELECT id, submitted_at, response_content, evaluation, evaluated_at
+                FROM task_page_responses
+                WHERE task_page_id = %s AND device_token = %s
+                ORDER BY submitted_at DESC
+            """, (task_page_id, device_token))
+            rows = cur.fetchall()
+
+            responses = []
+            for row in rows:
+                responses.append({
+                    "id": row[0],
+                    "submitted_at": row[1].isoformat() if row[1] else None,
+                    "response_content": row[2],
+                    "evaluation": row[3],
+                    "evaluated_at": row[4].isoformat() if row[4] else None,
+                    "has_evaluation": row[3] is not None
+                })
+
+            return jsonify({"responses": responses})
+
+
+@app.route("/api/task-pages/<task_page_id>/evaluation", methods=["GET"])
+def task_page_get_evaluation(task_page_id):
+    """Get the latest evaluation for a task page response."""
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+    if not device_token:
+        return jsonify({"error": "Device token required"}), 401
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify task page exists
+            cur.execute("SELECT id FROM task_pages WHERE id = %s", (task_page_id,))
+            if not cur.fetchone():
+                return jsonify({"error": "Task page not found"}), 404
+
+            # Get the most recent response with an evaluation
+            cur.execute("""
+                SELECT id, submitted_at, response_content, evaluation, evaluated_at
+                FROM task_page_responses
+                WHERE task_page_id = %s AND device_token = %s AND evaluation IS NOT NULL
+                ORDER BY evaluated_at DESC
+                LIMIT 1
+            """, (task_page_id, device_token))
+            row = cur.fetchone()
+
+            if not row:
+                return jsonify({"has_evaluation": False, "evaluation": None})
+
+            return jsonify({
+                "has_evaluation": True,
+                "response_id": row[0],
+                "submitted_at": row[1].isoformat() if row[1] else None,
+                "response_content": row[2],
+                "evaluation": row[3],
+                "evaluated_at": row[4].isoformat() if row[4] else None
+            })
+
+
+@app.route("/api/task-pages/statuses", methods=["POST"])
+def task_pages_batch_statuses():
+    """Get statuses for multiple task pages in a single request (for PWA sync)."""
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+    if not device_token:
+        return jsonify({"error": "Device token required"}), 401
+
+    data = request.get_json()
+    if not data or "task_page_ids" not in data:
+        return jsonify({"error": "task_page_ids array is required"}), 400
+
+    task_page_ids = data["task_page_ids"]
+    if not isinstance(task_page_ids, list) or len(task_page_ids) == 0:
+        return jsonify({"error": "task_page_ids must be a non-empty array"}), 400
+
+    # Limit batch size to prevent abuse
+    if len(task_page_ids) > 100:
+        return jsonify({"error": "Maximum 100 task page IDs per request"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Get statuses for all requested task pages
+            placeholders = ",".join(["%s"] * len(task_page_ids))
+            cur.execute(f"""
+                SELECT task_page_id, status, started_at, completed_at, updated_at
+                FROM task_page_statuses
+                WHERE task_page_id IN ({placeholders}) AND device_token = %s
+            """, (*task_page_ids, device_token))
+            rows = cur.fetchall()
+
+            # Build lookup dict
+            statuses_by_id = {}
+            for row in rows:
+                statuses_by_id[row[0]] = {
+                    "task_page_id": row[0],
+                    "status": row[1],
+                    "started_at": row[2].isoformat() if row[2] else None,
+                    "completed_at": row[3].isoformat() if row[3] else None,
+                    "updated_at": row[4].isoformat() if row[4] else None
+                }
+
+            # Return statuses for all requested IDs (default to not_started)
+            statuses = []
+            for page_id in task_page_ids:
+                if page_id in statuses_by_id:
+                    statuses.append(statuses_by_id[page_id])
+                else:
+                    statuses.append({
+                        "task_page_id": page_id,
+                        "status": "not_started",
+                        "started_at": None,
+                        "completed_at": None,
+                        "updated_at": None
+                    })
+
+            return jsonify({"statuses": statuses})
+
+
 # ==========================================================
 # LEGACY API - For backwards compatibility during transition
 # These endpoints will be removed after full migration to local-first
