@@ -739,11 +739,12 @@ export function taskPagesList() {
                 const data = await response.json();
                 this.taskPages = data.task_pages || [];
 
-                // Cache task pages locally (without full HTML)
-                await db.saveTaskPages(this.taskPages);
+                // Cache task pages locally (unwrap Alpine proxies via JSON roundtrip)
+                const plainTaskPages = JSON.parse(JSON.stringify(this.taskPages));
+                await db.saveTaskPages(plainTaskPages);
 
                 // Also save statuses locally
-                const statuses = this.taskPages
+                const statuses = plainTaskPages
                     .filter(tp => tp.status)
                     .map(tp => ({
                         task_page_id: tp.id,
