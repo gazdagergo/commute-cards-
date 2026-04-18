@@ -557,6 +557,242 @@ export function learningApp() {
     };
 }
 
+/**
+ * Task page view component
+ * Handles displaying task pages in iframes and managing their state
+ */
+export function taskPageView() {
+    return {
+        // Task page state
+        taskPageId: null,
+        taskPage: null,
+        taskPageHtml: null,
+        loading: true,
+        error: null,
+
+        // Status
+        status: null,
+
+        /**
+         * Load a task page by ID
+         */
+        async loadTaskPage(id) {
+            this.taskPageId = id;
+            this.loading = true;
+            this.error = null;
+            this.taskPage = null;
+            this.taskPageHtml = null;
+
+            try {
+                // Try to get from cache first
+                let taskPage = await db.getTaskPage(id);
+
+                if (!taskPage) {
+                    // Fetch from server
+                    const deviceToken = await db.getOrCreateDeviceToken();
+                    const response = await fetch(`/api/task-pages/${id}`, {
+                        headers: { 'X-Device-Token': deviceToken }
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Task page not found');
+                    }
+
+                    taskPage = await response.json();
+
+                    // Cache it (without HTML for now)
+                    await db.saveTaskPage(taskPage);
+                }
+
+                this.taskPage = taskPage;
+
+                // Get status from local DB
+                this.status = await db.getTaskPageStatus(id);
+
+                // Fetch HTML content
+                const htmlResponse = await fetch(`/api/task-pages/${id}/html`);
+                if (htmlResponse.ok) {
+                    this.taskPageHtml = await htmlResponse.text();
+                }
+
+                this.loading = false;
+
+                // Render in iframe after DOM update
+                this.$nextTick(() => this.renderInIframe());
+
+            } catch (e) {
+                console.error('Failed to load task page:', e);
+                this.error = e.message;
+                this.loading = false;
+            }
+        },
+
+        /**
+         * Render task page HTML in iframe with injected config
+         */
+        async renderInIframe() {
+            const iframe = this.$refs.taskFrame;
+            if (!iframe || !this.taskPageHtml) return;
+
+            const deviceToken = await db.getOrCreateDeviceToken();
+
+            // Inject config into HTML
+            let html = this.taskPageHtml;
+            html = html.replace(/\{\{device_token\}\}/g, deviceToken);
+            html = html.replace(/\{\{task_page_id\}\}/g, this.taskPageId);
+            html = html.replace(/\{\{api_base\}\}/g, '/api');
+
+            // Use srcdoc to render
+            iframe.srcdoc = html;
+        },
+
+        /**
+         * Update task page status (locally and queue for sync)
+         */
+        async updateStatus(newStatus) {
+            if (!this.taskPageId) return;
+
+            try {
+                // Update locally
+                this.status = await db.updateTaskPageStatus(this.taskPageId, newStatus);
+
+                // Queue for sync if online, otherwise just save locally
+                if (navigator.onLine) {
+                    const deviceToken = await db.getOrCreateDeviceToken();
+                    await fetch(`/api/task-pages/${this.taskPageId}/status`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Device-Token': deviceToken
+                        },
+                        body: JSON.stringify({ status: newStatus })
+                    });
+                } else {
+                    // Queue for later sync
+                    await db.queueTaskUpdate(this.taskPageId, newStatus);
+                }
+
+                console.log('Task page status updated:', newStatus);
+            } catch (e) {
+                console.error('Failed to update status:', e);
+            }
+        },
+
+        /**
+         * Get status badge class
+         */
+        getStatusBadgeClass(status) {
+            const classes = {
+                'not_started': 'bg-gray-100 text-gray-600',
+                'draft': 'bg-amber-100 text-amber-700',
+                'in_progress': 'bg-blue-100 text-blue-700',
+                'completed': 'bg-green-100 text-green-700'
+            };
+            return classes[status] || classes['not_started'];
+        },
+
+        /**
+         * Get status display text
+         */
+        getStatusText(status) {
+            const texts = {
+                'not_started': 'Nicht gestartet',
+                'draft': 'Entwurf',
+                'in_progress': 'In Bearbeitung',
+                'completed': 'Abgeschlossen'
+            };
+            return texts[status] || texts['not_started'];
+        }
+    };
+}
+
+/**
+ * Task pages list component
+ * Shows available task pages with their statuses
+ */
+export function taskPagesList() {
+    return {
+        taskPages: [],
+        loading: true,
+        error: null,
+
+        async init() {
+            await this.loadTaskPages();
+        },
+
+        async loadTaskPages() {
+            this.loading = true;
+            this.error = null;
+
+            try {
+                const deviceToken = await db.getOrCreateDeviceToken();
+
+                // Fetch from server
+                const response = await fetch('/api/task-pages', {
+                    headers: { 'X-Device-Token': deviceToken }
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to fetch task pages');
+                }
+
+                const data = await response.json();
+                this.taskPages = data.task_pages || [];
+
+                // Cache task pages locally (without full HTML)
+                await db.saveTaskPages(this.taskPages);
+
+                // Also save statuses locally
+                const statuses = this.taskPages
+                    .filter(tp => tp.status)
+                    .map(tp => ({
+                        task_page_id: tp.id,
+                        status: tp.status.status,
+                        started_at: tp.status.started_at,
+                        completed_at: tp.status.completed_at,
+                        updated_at: tp.status.updated_at
+                    }));
+                if (statuses.length > 0) {
+                    await db.saveTaskPageStatuses(statuses);
+                }
+
+            } catch (e) {
+                console.error('Failed to load task pages:', e);
+                this.error = e.message;
+
+                // Try to load from cache
+                this.taskPages = await db.getAllTaskPages();
+            } finally {
+                this.loading = false;
+            }
+        },
+
+        getStatusBadgeClass(taskPage) {
+            const status = taskPage.status?.status || 'not_started';
+            const classes = {
+                'not_started': 'bg-gray-100 text-gray-600',
+                'draft': 'bg-amber-100 text-amber-700',
+                'in_progress': 'bg-blue-100 text-blue-700',
+                'completed': 'bg-green-100 text-green-700'
+            };
+            return classes[status] || classes['not_started'];
+        },
+
+        getStatusText(taskPage) {
+            const status = taskPage.status?.status || 'not_started';
+            const texts = {
+                'not_started': 'Nicht gestartet',
+                'draft': 'Entwurf',
+                'in_progress': 'In Bearbeitung',
+                'completed': 'Abgeschlossen'
+            };
+            return texts[status] || texts['not_started'];
+        }
+    };
+}
+
 // Make components available globally for Alpine
 window.cardResponse = cardResponse;
 window.learningApp = learningApp;
+window.taskPageView = taskPageView;
+window.taskPagesList = taskPagesList;

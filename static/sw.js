@@ -1,10 +1,11 @@
-const CACHE_NAME = 'sociology-pwa-v2';
+const CACHE_NAME = 'sociology-pwa-v3';
 const STATIC_ASSETS = [
     '/',
     '/static/manifest.json',
     '/static/js/db.js',
     '/static/js/sync.js',
-    '/static/js/app.js'
+    '/static/js/app.js',
+    '/static/js/task-api.js'
 ];
 
 // Install event - cache static assets

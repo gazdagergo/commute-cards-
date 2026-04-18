@@ -14,11 +14,13 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <!-- Local-first modules - load and register before Alpine starts -->
     <script type="module">
-        import { cardResponse, learningApp } from '/static/js/app.js';
+        import { cardResponse, learningApp, taskPageView, taskPagesList } from '/static/js/app.js';
 
         // Register components globally for Alpine
         window.cardResponse = cardResponse;
         window.learningApp = learningApp;
+        window.taskPageView = taskPageView;
+        window.taskPagesList = taskPagesList;
 
         // Now dynamically load and start Alpine
         const script = document.createElement('script');
@@ -378,10 +380,164 @@
 
         <!-- Offline indicator bar -->
         <div x-show="!syncState.isOnline" x-cloak
-             class="fixed bottom-0 left-0 right-0 bg-gray-800 text-white text-center py-2 text-sm safe-bottom">
+             class="fixed bottom-14 left-0 right-0 bg-gray-800 text-white text-center py-2 text-sm">
             Offline - Antworten werden lokal gespeichert
         </div>
     </div>
+
+    <!-- Task Pages Section (separate from learningApp) -->
+    <div id="task-pages-app" x-data="{ currentView: 'list', selectedTaskPageId: null }" x-cloak class="hidden max-w-lg mx-auto">
+        <!-- Task Pages List View -->
+        <div x-show="currentView === 'list'" x-data="taskPagesList()" x-init="init()">
+            <header class="bg-indigo-600 text-white px-4 py-3 sticky top-0 z-10">
+                <div class="flex items-center justify-between">
+                    <h1 class="font-semibold">Aufgaben</h1>
+                    <button @click="loadTaskPages()" class="p-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-400">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                    </button>
+                </div>
+            </header>
+
+            <main class="p-4 pb-20">
+                <!-- Loading -->
+                <div x-show="loading" class="flex items-center justify-center py-20">
+                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+                </div>
+
+                <!-- Error -->
+                <div x-show="!loading && error" x-cloak class="text-center py-10">
+                    <p class="text-red-600 mb-4" x-text="error"></p>
+                    <button @click="loadTaskPages()" class="px-4 py-2 bg-indigo-600 text-white rounded-lg">
+                        Erneut versuchen
+                    </button>
+                </div>
+
+                <!-- Empty state -->
+                <div x-show="!loading && !error && taskPages.length === 0" x-cloak class="text-center py-20">
+                    <div class="text-6xl mb-4">📝</div>
+                    <h2 class="text-xl font-semibold text-gray-800 mb-2">Keine Aufgaben</h2>
+                    <p class="text-gray-600">Es gibt noch keine Aufgaben.</p>
+                </div>
+
+                <!-- Task pages list -->
+                <div x-show="!loading && !error && taskPages.length > 0" class="space-y-3">
+                    <template x-for="taskPage in taskPages" :key="taskPage.id">
+                        <button @click="selectedTaskPageId = taskPage.id; currentView = 'detail'"
+                                class="w-full text-left bg-white rounded-xl shadow-sm p-4 hover:shadow-md transition-shadow">
+                            <div class="flex items-start justify-between">
+                                <div class="flex-1">
+                                    <h3 class="font-semibold text-gray-800" x-text="taskPage.title"></h3>
+                                    <p class="text-sm text-gray-500 mt-1 line-clamp-2" x-text="taskPage.description"></p>
+                                    <div class="flex items-center gap-2 mt-2">
+                                        <span class="text-xs px-2 py-0.5 rounded-full"
+                                              :class="getStatusBadgeClass(taskPage)"
+                                              x-text="getStatusText(taskPage)"></span>
+                                        <span x-show="taskPage.estimated_duration_minutes"
+                                              class="text-xs text-gray-400"
+                                              x-text="'~' + taskPage.estimated_duration_minutes + ' Min.'"></span>
+                                    </div>
+                                </div>
+                                <svg class="w-5 h-5 text-gray-400 mt-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                                </svg>
+                            </div>
+                        </button>
+                    </template>
+                </div>
+            </main>
+        </div>
+
+        <!-- Task Page Detail View -->
+        <div x-show="currentView === 'detail'" x-data="taskPageView()">
+            <!-- Header -->
+            <header class="bg-indigo-600 text-white px-4 py-3 sticky top-0 z-10">
+                <div class="flex items-center gap-3">
+                    <button @click="currentView = 'list'; selectedTaskPageId = null"
+                            class="p-1 rounded-lg hover:bg-indigo-500">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                        </svg>
+                    </button>
+                    <h1 class="font-semibold truncate" x-text="taskPage?.title || 'Laden...'"></h1>
+                </div>
+            </header>
+
+            <!-- Load task page when this view becomes active -->
+            <template x-if="currentView === 'detail' && selectedTaskPageId">
+                <div x-init="loadTaskPage(selectedTaskPageId)">
+                    <!-- Loading -->
+                    <div x-show="loading" class="flex items-center justify-center py-20">
+                        <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+                    </div>
+
+                    <!-- Error -->
+                    <div x-show="!loading && error" x-cloak class="text-center py-10 px-4">
+                        <p class="text-red-600 mb-4" x-text="error"></p>
+                        <button @click="loadTaskPage(selectedTaskPageId)"
+                                class="px-4 py-2 bg-indigo-600 text-white rounded-lg">
+                            Erneut versuchen
+                        </button>
+                    </div>
+
+                    <!-- Task page iframe -->
+                    <div x-show="!loading && !error && taskPageHtml" class="pb-16">
+                        <!-- Status bar -->
+                        <div class="bg-white border-b px-4 py-2 flex items-center justify-between">
+                            <span class="text-xs px-2 py-0.5 rounded-full"
+                                  :class="getStatusBadgeClass(status?.status)"
+                                  x-text="getStatusText(status?.status)"></span>
+                            <div class="flex gap-2">
+                                <button x-show="status?.status !== 'in_progress'"
+                                        @click="updateStatus('in_progress')"
+                                        class="text-xs px-3 py-1 bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200">
+                                    Starten
+                                </button>
+                                <button x-show="status?.status === 'in_progress'"
+                                        @click="updateStatus('completed')"
+                                        class="text-xs px-3 py-1 bg-green-100 text-green-700 rounded-lg hover:bg-green-200">
+                                    Abschliessen
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- iframe container -->
+                        <iframe x-ref="taskFrame"
+                                class="w-full border-0"
+                                style="height: calc(100vh - 120px);"
+                                sandbox="allow-scripts allow-forms allow-same-origin"></iframe>
+                    </div>
+                </div>
+            </template>
+        </div>
+    </div>
+
+    <!-- Bottom Navigation -->
+    <nav class="fixed bottom-0 left-0 right-0 bg-white border-t safe-bottom z-50 max-w-lg mx-auto"
+         x-data="{ activeTab: 'cards' }">
+        <div class="flex">
+            <button @click="activeTab = 'cards'; document.getElementById('task-pages-app').classList.add('hidden'); document.querySelector('[x-data*=learningApp]').classList.remove('hidden')"
+                    class="flex-1 py-3 flex flex-col items-center gap-1 transition-colors"
+                    :class="activeTab === 'cards' ? 'text-indigo-600' : 'text-gray-400'">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                </svg>
+                <span class="text-xs font-medium">Karten</span>
+            </button>
+            <button @click="activeTab = 'tasks'; document.querySelector('[x-data*=learningApp]').classList.add('hidden'); document.getElementById('task-pages-app').classList.remove('hidden')"
+                    class="flex-1 py-3 flex flex-col items-center gap-1 transition-colors"
+                    :class="activeTab === 'tasks' ? 'text-indigo-600' : 'text-gray-400'">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                </svg>
+                <span class="text-xs font-medium">Aufgaben</span>
+            </button>
+        </div>
+    </nav>
 
     <!-- Service Worker Registration -->
     <script>
