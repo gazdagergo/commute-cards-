@@ -11,7 +11,7 @@
  */
 
 const DB_NAME = 'sociology-learning';
-const DB_VERSION = 1;
+const DB_VERSION = 3;
 
 let dbInstance = null;
 
@@ -81,6 +81,33 @@ export async function openDB() {
                 });
                 syncStore.createIndex('synced_at', 'synced_at', { unique: false });
             }
+
+            // Drafts store - save work in progress (v2)
+            if (!db.objectStoreNames.contains('drafts')) {
+                db.createObjectStore('drafts', { keyPath: 'card_id' });
+            }
+
+            // Task pages store - cached task page content (v3)
+            if (!db.objectStoreNames.contains('task_pages')) {
+                const taskPagesStore = db.createObjectStore('task_pages', { keyPath: 'id' });
+                taskPagesStore.createIndex('course_id', 'course_id', { unique: false });
+                taskPagesStore.createIndex('updated_at', 'updated_at', { unique: false });
+            }
+
+            // Task page statuses - local status tracking (v3)
+            if (!db.objectStoreNames.contains('task_page_statuses')) {
+                const statusesStore = db.createObjectStore('task_page_statuses', { keyPath: 'task_page_id' });
+                statusesStore.createIndex('status', 'status', { unique: false });
+            }
+
+            // Pending task updates - offline queue (v3)
+            if (!db.objectStoreNames.contains('pending_task_updates')) {
+                const pendingStore = db.createObjectStore('pending_task_updates', {
+                    keyPath: 'id',
+                    autoIncrement: true
+                });
+                pendingStore.createIndex('task_page_id', 'task_page_id', { unique: false });
+            }
         };
     });
 }
@@ -145,6 +172,94 @@ export async function setLastSync(timestamp) {
 }
 
 // =============================================================================
+// COURSE SUBSCRIPTIONS
+// =============================================================================
+
+// Default courses - only sociology enabled by default
+// ML courses require explicit opt-in
+const DEFAULT_SUBSCRIBED_COURSES = ['sociology'];
+
+/**
+ * Get subscribed course slugs
+ * Returns default if not set
+ */
+export async function getSubscribedCourses() {
+    const stored = await getConfig('subscribed_courses');
+    if (stored === undefined || stored === null) {
+        return DEFAULT_SUBSCRIBED_COURSES;
+    }
+    return stored;
+}
+
+/**
+ * Set subscribed course slugs
+ */
+export async function setSubscribedCourses(courseSlugs) {
+    return await setConfig('subscribed_courses', courseSlugs);
+}
+
+/**
+ * Check if a course is subscribed
+ */
+export async function isCourseSubscribed(courseSlug) {
+    const subscribed = await getSubscribedCourses();
+    return subscribed.includes(courseSlug);
+}
+
+/**
+ * Toggle course subscription
+ */
+export async function toggleCourseSubscription(courseSlug) {
+    const subscribed = await getSubscribedCourses();
+    const index = subscribed.indexOf(courseSlug);
+    if (index >= 0) {
+        subscribed.splice(index, 1);
+    } else {
+        subscribed.push(courseSlug);
+    }
+    await setSubscribedCourses(subscribed);
+    return subscribed;
+}
+
+// =============================================================================
+// TAG SUBSCRIPTIONS
+// =============================================================================
+
+/**
+ * Get subscribed tags
+ * Returns empty array if not set (empty = show all)
+ */
+export async function getSubscribedTags() {
+    const stored = await getConfig('subscribed_tags');
+    if (stored === undefined || stored === null) {
+        return [];  // Empty = show all
+    }
+    return stored;
+}
+
+/**
+ * Set subscribed tags
+ */
+export async function setSubscribedTags(tags) {
+    return await setConfig('subscribed_tags', tags);
+}
+
+/**
+ * Toggle tag subscription
+ */
+export async function toggleTagSubscription(tag) {
+    const subscribed = await getSubscribedTags();
+    const index = subscribed.indexOf(tag);
+    if (index >= 0) {
+        subscribed.splice(index, 1);
+    } else {
+        subscribed.push(tag);
+    }
+    await setSubscribedTags(subscribed);
+    return subscribed;
+}
+
+// =============================================================================
 // CARDS OPERATIONS
 // =============================================================================
 
@@ -204,6 +319,20 @@ export async function getCardCount() {
         const store = tx.objectStore('cards');
         const request = store.count();
         request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Clear all cards (used when changing subscriptions)
+ */
+export async function clearCards() {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('cards', 'readwrite');
+        const store = tx.objectStore('cards');
+        const request = store.clear();
+        request.onsuccess = () => resolve();
         request.onerror = () => reject(request.error);
     });
 }
@@ -492,6 +621,65 @@ export async function saveNotes(cardId, content) {
 }
 
 // =============================================================================
+// DRAFTS OPERATIONS
+// =============================================================================
+
+/**
+ * Save a draft for a card
+ * formData is an object with input values keyed by name or index
+ */
+export async function saveDraft(cardId, formData) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('drafts', 'readwrite');
+        const store = tx.objectStore('drafts');
+        const request = store.put({
+            card_id: cardId,
+            form_data: formData,
+            saved_at: new Date().toISOString()
+        });
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Get draft for a card
+ */
+export async function getDraft(cardId) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('drafts', 'readonly');
+        const store = tx.objectStore('drafts');
+        const request = store.get(cardId);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Clear draft for a card (after submission)
+ */
+export async function clearDraft(cardId) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('drafts', 'readwrite');
+        const store = tx.objectStore('drafts');
+        const request = store.delete(cardId);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Check if a card has a draft
+ */
+export async function hasDraft(cardId) {
+    const draft = await getDraft(cardId);
+    return draft !== null;
+}
+
+// =============================================================================
 // PENDING RESPONSES OPERATIONS
 // =============================================================================
 
@@ -599,6 +787,249 @@ export async function getRecentSyncs(limit = 10) {
                 resolve(results);
             }
         };
+        request.onerror = () => reject(request.error);
+    });
+}
+
+// =============================================================================
+// TASK PAGES OPERATIONS
+// =============================================================================
+
+/**
+ * Get all cached task pages
+ */
+export async function getAllTaskPages() {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('task_pages', 'readonly');
+        const store = tx.objectStore('task_pages');
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Get a single task page by ID
+ */
+export async function getTaskPage(id) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('task_pages', 'readonly');
+        const store = tx.objectStore('task_pages');
+        const request = store.get(id);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Save a task page (from server)
+ */
+export async function saveTaskPage(taskPage) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('task_pages', 'readwrite');
+        const store = tx.objectStore('task_pages');
+        const request = store.put(taskPage);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Save multiple task pages (from sync)
+ */
+export async function saveTaskPages(taskPages) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('task_pages', 'readwrite');
+        const store = tx.objectStore('task_pages');
+
+        for (const page of taskPages) {
+            store.put(page);
+        }
+
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+/**
+ * Get task page count
+ */
+export async function getTaskPageCount() {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('task_pages', 'readonly');
+        const store = tx.objectStore('task_pages');
+        const request = store.count();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+// =============================================================================
+// TASK PAGE STATUS OPERATIONS
+// =============================================================================
+
+/**
+ * Get status for a task page
+ */
+export async function getTaskPageStatus(taskPageId) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('task_page_statuses', 'readonly');
+        const store = tx.objectStore('task_page_statuses');
+        const request = store.get(taskPageId);
+        request.onsuccess = () => resolve(request.result || { task_page_id: taskPageId, status: 'not_started' });
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Update status for a task page locally
+ */
+export async function updateTaskPageStatus(taskPageId, status, notes = null) {
+    const db = await openDB();
+    const now = new Date().toISOString();
+
+    // Get existing status
+    const existing = await getTaskPageStatus(taskPageId);
+
+    const statusData = {
+        task_page_id: taskPageId,
+        status,
+        updated_at: now,
+        started_at: existing.started_at,
+        completed_at: existing.completed_at,
+        notes: notes !== null ? notes : existing.notes
+    };
+
+    // Set timestamps based on status transitions
+    if (['draft', 'in_progress', 'completed'].includes(status) && !statusData.started_at) {
+        statusData.started_at = now;
+    }
+    if (status === 'completed' && !statusData.completed_at) {
+        statusData.completed_at = now;
+    }
+
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('task_page_statuses', 'readwrite');
+        const store = tx.objectStore('task_page_statuses');
+        const request = store.put(statusData);
+        request.onsuccess = () => resolve(statusData);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Get all task page statuses
+ */
+export async function getAllTaskPageStatuses() {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('task_page_statuses', 'readonly');
+        const store = tx.objectStore('task_page_statuses');
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Bulk update statuses (from server sync)
+ */
+export async function saveTaskPageStatuses(statuses) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('task_page_statuses', 'readwrite');
+        const store = tx.objectStore('task_page_statuses');
+
+        for (const status of statuses) {
+            store.put(status);
+        }
+
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+// =============================================================================
+// PENDING TASK UPDATES (OFFLINE QUEUE)
+// =============================================================================
+
+/**
+ * Queue a task page status update for sync
+ */
+export async function queueTaskUpdate(taskPageId, status, notes = null) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('pending_task_updates', 'readwrite');
+        const store = tx.objectStore('pending_task_updates');
+        const request = store.add({
+            task_page_id: taskPageId,
+            status,
+            notes,
+            queued_at: new Date().toISOString()
+        });
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Get all pending task updates
+ */
+export async function getPendingTaskUpdates() {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('pending_task_updates', 'readonly');
+        const store = tx.objectStore('pending_task_updates');
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Remove a pending task update (after successful sync)
+ */
+export async function removePendingTaskUpdate(id) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('pending_task_updates', 'readwrite');
+        const store = tx.objectStore('pending_task_updates');
+        const request = store.delete(id);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Clear all pending task updates
+ */
+export async function clearPendingTaskUpdates() {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('pending_task_updates', 'readwrite');
+        const store = tx.objectStore('pending_task_updates');
+        const request = store.clear();
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Get pending task update count
+ */
+export async function getPendingTaskUpdateCount() {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('pending_task_updates', 'readonly');
+        const store = tx.objectStore('pending_task_updates');
+        const request = store.count();
+        request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
     });
 }

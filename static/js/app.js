@@ -140,12 +140,31 @@ export function learningApp() {
         notesEditText: '',
         notesSaving: false,
 
+        // Settings state
+        settingsOpen: false,
+        availableCourses: [],
+        subscribedCourses: [],
+        availableTags: [],
+        subscribedTags: [],
+
+        // Draft state
+        currentDraft: null,
+        savingDraft: false,
+
+        // Task reference card state
+        taskReferenceInfo: null,
+
         /**
          * Initialize on mount
          */
         async init() {
             await initApp();
             this.initialized = true;
+
+            // Load subscribed courses and tags
+            this.subscribedCourses = await db.getSubscribedCourses();
+            this.subscribedTags = await db.getSubscribedTags();
+
             await this.loadNextCard();
         },
 
@@ -157,15 +176,29 @@ export function learningApp() {
             this.showFeedback = false;
             this.resetFeedback();
             this.closeNotesDrawer();
+            this.currentDraft = null;
+            this.taskReferenceInfo = null;
 
             try {
                 // Get next card from local database
                 const card = await db.getNextCard();
 
                 if (card) {
-                    // Load notes for this card
+                    // Load notes and draft for this card
                     const notes = await db.getNotes(card.id);
+                    const draft = await db.getDraft(card.id);
                     this.currentCard = { ...card, notes };
+                    this.currentDraft = draft;
+
+                    // If this is a task reference card, load task page info
+                    if (card.card_type === 'task_reference' && card.task_page_id) {
+                        await this.loadTaskPageInfo();
+                    }
+
+                    // If there's a draft (for non-task-reference cards), restore it after DOM updates
+                    if (draft && card.card_type !== 'task_reference') {
+                        this.$nextTick(() => this.restoreDraft());
+                    }
                 } else {
                     this.currentCard = null;
                 }
@@ -195,10 +228,16 @@ export function learningApp() {
         /**
          * Called when a card response is submitted
          */
-        onCardSubmitted(message, localId) {
+        async onCardSubmitted(message, localId) {
             this.successMessage = message || 'Gespeichert';
             this.currentLocalId = localId;
             this.showFeedback = true;
+
+            // Clear draft since the card was submitted
+            if (this.currentCard) {
+                await db.clearDraft(this.currentCard.id);
+                this.currentDraft = null;
+            }
         },
 
         /**
@@ -358,6 +397,594 @@ export function learningApp() {
             } catch (e) {
                 return text;
             }
+        },
+
+        // =================================================================
+        // Settings methods
+        // =================================================================
+
+        async openSettings() {
+            this.settingsOpen = true;
+
+            // Fetch available courses and tags from server
+            try {
+                const [coursesResponse, tagsResponse] = await Promise.all([
+                    fetch('/api/courses'),
+                    fetch('/api/tags')
+                ]);
+
+                if (coursesResponse.ok) {
+                    const data = await coursesResponse.json();
+                    this.availableCourses = data.courses || [];
+                }
+
+                if (tagsResponse.ok) {
+                    const data = await tagsResponse.json();
+                    this.availableTags = data.tags || [];
+                }
+            } catch (e) {
+                console.error('Failed to fetch settings data:', e);
+            }
+        },
+
+        closeSettings() {
+            this.settingsOpen = false;
+        },
+
+        async toggleCourse(slug) {
+            // Toggle in local state
+            const index = this.subscribedCourses.indexOf(slug);
+            if (index >= 0) {
+                this.subscribedCourses.splice(index, 1);
+            } else {
+                this.subscribedCourses.push(slug);
+            }
+
+            // Persist to IndexedDB
+            await db.setSubscribedCourses([...this.subscribedCourses]);
+
+            // Clear local cards and re-fetch based on new subscriptions
+            await this.refreshCardsForSubscriptions();
+        },
+
+        async refreshCardsForSubscriptions() {
+            // Clear existing cards from IndexedDB
+            await db.clearCards();
+
+            // Fetch new cards based on current subscriptions
+            if (sync.syncState.isOnline) {
+                await sync.fetchInitialCards();
+            }
+
+            // Reload current card
+            await this.loadNextCard();
+        },
+
+        async toggleTag(tag) {
+            // Toggle in local state
+            const index = this.subscribedTags.indexOf(tag);
+            if (index >= 0) {
+                this.subscribedTags.splice(index, 1);
+            } else {
+                this.subscribedTags.push(tag);
+            }
+
+            // Persist to IndexedDB
+            await db.setSubscribedTags([...this.subscribedTags]);
+
+            // Clear local cards and re-fetch based on new tag selection
+            await this.refreshCardsForSubscriptions();
+        },
+
+        // =================================================================
+        // Draft methods
+        // =================================================================
+
+        /**
+         * Capture current form state from card inputs
+         */
+        captureFormState() {
+            const cardContainer = document.getElementById('card-content');
+            if (!cardContainer) return null;
+
+            const formData = {};
+            let hasContent = false;
+
+            // Capture all input values
+            const inputs = cardContainer.querySelectorAll('input, textarea, select');
+            inputs.forEach((input, index) => {
+                const key = input.name || `input_${index}`;
+
+                if (input.type === 'radio') {
+                    if (input.checked) {
+                        formData[input.name] = input.value;
+                        hasContent = true;
+                    }
+                } else if (input.type === 'checkbox') {
+                    if (!formData[key]) formData[key] = [];
+                    if (input.checked) {
+                        formData[key].push(input.value);
+                        hasContent = true;
+                    }
+                } else {
+                    const value = input.value?.trim();
+                    if (value) {
+                        formData[key] = value;
+                        hasContent = true;
+                    }
+                }
+            });
+
+            return hasContent ? formData : null;
+        },
+
+        /**
+         * Restore draft values to form inputs
+         */
+        restoreDraft() {
+            if (!this.currentDraft?.form_data) return;
+
+            const cardContainer = document.getElementById('card-content');
+            if (!cardContainer) return;
+
+            const formData = this.currentDraft.form_data;
+
+            // Restore values to inputs
+            const inputs = cardContainer.querySelectorAll('input, textarea, select');
+            inputs.forEach((input, index) => {
+                const key = input.name || `input_${index}`;
+
+                if (input.type === 'radio') {
+                    if (formData[input.name] === input.value) {
+                        input.checked = true;
+                        // Trigger change event for Alpine reactivity
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                } else if (input.type === 'checkbox') {
+                    const values = formData[key] || [];
+                    if (values.includes(input.value)) {
+                        input.checked = true;
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                } else if (formData[key]) {
+                    input.value = formData[key];
+                    // Trigger input event for Alpine reactivity
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            });
+
+            console.log('Draft restored for card', this.currentCard?.id);
+        },
+
+        /**
+         * Save current work as draft and move to next card
+         */
+        async saveDraftAndContinue() {
+            if (!this.currentCard || this.savingDraft) return;
+
+            this.savingDraft = true;
+
+            try {
+                const formData = this.captureFormState();
+
+                if (formData) {
+                    await db.saveDraft(this.currentCard.id, formData);
+                    console.log('Draft saved for card', this.currentCard.id);
+                }
+
+                // Move to next card (draft cards will come back later)
+                await this.loadNextCard();
+
+            } catch (e) {
+                console.error('Failed to save draft:', e);
+            } finally {
+                this.savingDraft = false;
+            }
+        },
+
+        /**
+         * Clear draft for current card
+         */
+        async clearCurrentDraft() {
+            if (!this.currentCard) return;
+
+            await db.clearDraft(this.currentCard.id);
+            this.currentDraft = null;
+        },
+
+        // =================================================================
+        // Task Reference Card methods
+        // =================================================================
+
+        /**
+         * Check if current card is a task reference
+         */
+        isTaskReference() {
+            return this.currentCard?.card_type === 'task_reference' && this.currentCard?.task_page_id;
+        },
+
+        /**
+         * Load task page info for task reference cards
+         */
+        async loadTaskPageInfo() {
+            if (!this.isTaskReference()) {
+                this.taskReferenceInfo = null;
+                return;
+            }
+
+            const taskPageId = this.currentCard.task_page_id;
+
+            try {
+                // Try cache first
+                let taskPage = await db.getTaskPage(taskPageId);
+
+                if (!taskPage) {
+                    // Fetch from server
+                    const deviceToken = await db.getOrCreateDeviceToken();
+                    const response = await fetch(`/api/task-pages/${taskPageId}`, {
+                        headers: { 'X-Device-Token': deviceToken }
+                    });
+
+                    if (response.ok) {
+                        taskPage = await response.json();
+                        await db.saveTaskPage(taskPage);
+                    }
+                }
+
+                // Get status
+                const status = await db.getTaskPageStatus(taskPageId);
+
+                this.taskReferenceInfo = {
+                    taskPage,
+                    status: status?.status || 'not_started'
+                };
+
+            } catch (e) {
+                console.error('Failed to load task page info:', e);
+                this.taskReferenceInfo = null;
+            }
+        },
+
+        /**
+         * Open the task page for current task reference card
+         * Switches to task pages tab and opens the detail view
+         */
+        openTaskPage() {
+            if (!this.isTaskReference()) return;
+
+            const taskPageId = this.currentCard.task_page_id;
+
+            // Switch to task pages tab
+            const taskPagesApp = document.getElementById('task-pages-app');
+            const learningAppEl = document.querySelector('[x-data*="learningApp"]');
+            const navButtons = document.querySelectorAll('nav button');
+
+            if (taskPagesApp && learningAppEl) {
+                // Hide learning app, show task pages app
+                learningAppEl.classList.add('hidden');
+                taskPagesApp.classList.remove('hidden');
+
+                // Update nav state
+                navButtons.forEach((btn, idx) => {
+                    if (idx === 0) btn.classList.remove('text-indigo-600');
+                    if (idx === 1) btn.classList.add('text-indigo-600');
+                });
+
+                // Set selected task page and view
+                const taskPagesData = Alpine.$data(taskPagesApp);
+                if (taskPagesData) {
+                    taskPagesData.selectedTaskPageId = taskPageId;
+                    taskPagesData.currentView = 'detail';
+                }
+            }
+        },
+
+        /**
+         * Mark task reference card as completed after task page is done
+         * Called when user completes the associated task page
+         */
+        async completeTaskReferenceCard() {
+            if (!this.isTaskReference()) return;
+
+            // Queue a minimal response indicating task completion
+            const localId = await db.queueResponse(this.currentCard.id, {
+                task_page_id: this.currentCard.task_page_id,
+                completed: true
+            });
+
+            await sync.updatePendingCount();
+
+            // Go to feedback screen
+            this.onCardSubmitted('Aufgabe abgeschlossen', localId);
+        },
+
+        /**
+         * Get status badge class for task reference
+         */
+        getTaskStatusBadgeClass(status) {
+            const classes = {
+                'not_started': 'bg-gray-100 text-gray-600',
+                'draft': 'bg-amber-100 text-amber-700',
+                'in_progress': 'bg-blue-100 text-blue-700',
+                'completed': 'bg-green-100 text-green-700'
+            };
+            return classes[status] || classes['not_started'];
+        },
+
+        /**
+         * Get status text for task reference
+         */
+        getTaskStatusText(status) {
+            const texts = {
+                'not_started': 'Nicht gestartet',
+                'draft': 'Entwurf',
+                'in_progress': 'In Bearbeitung',
+                'completed': 'Abgeschlossen'
+            };
+            return texts[status] || texts['not_started'];
+        },
+
+        /**
+         * Reset all local data (for testing)
+         */
+        async resetLocalData() {
+            if (!confirm('Alle lokalen Daten loeschen? Dies kann nicht rueckgaengig gemacht werden.')) {
+                return;
+            }
+
+            try {
+                // Delete IndexedDB database
+                await new Promise((resolve, reject) => {
+                    const request = indexedDB.deleteDatabase('sociology-learning');
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                    request.onblocked = () => {
+                        console.warn('Database deletion blocked - please close other tabs');
+                        resolve();
+                    };
+                });
+
+                // Reload the page to reinitialize
+                window.location.reload();
+            } catch (e) {
+                console.error('Failed to reset data:', e);
+                alert('Fehler beim Zuruecksetzen: ' + e.message);
+            }
+        }
+    };
+}
+
+/**
+ * Task page view component
+ * Handles displaying task pages in iframes and managing their state
+ */
+export function taskPageView() {
+    return {
+        // Task page state
+        taskPageId: null,
+        taskPage: null,
+        taskPageHtml: null,
+        loading: true,
+        error: null,
+
+        // Status
+        status: null,
+
+        /**
+         * Load a task page by ID
+         */
+        async loadTaskPage(id) {
+            this.taskPageId = id;
+            this.loading = true;
+            this.error = null;
+            this.taskPage = null;
+            this.taskPageHtml = null;
+
+            try {
+                // Try to get from cache first
+                let taskPage = await db.getTaskPage(id);
+
+                if (!taskPage) {
+                    // Fetch from server
+                    const deviceToken = await db.getOrCreateDeviceToken();
+                    const response = await fetch(`/api/task-pages/${id}`, {
+                        headers: { 'X-Device-Token': deviceToken }
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Task page not found');
+                    }
+
+                    taskPage = await response.json();
+
+                    // Cache it (without HTML for now)
+                    await db.saveTaskPage(taskPage);
+                }
+
+                this.taskPage = taskPage;
+
+                // Get status from local DB
+                this.status = await db.getTaskPageStatus(id);
+
+                // Fetch HTML content
+                const htmlResponse = await fetch(`/api/task-pages/${id}/html`);
+                if (htmlResponse.ok) {
+                    this.taskPageHtml = await htmlResponse.text();
+                }
+
+                this.loading = false;
+
+                // Render in iframe after DOM update
+                this.$nextTick(() => this.renderInIframe());
+
+            } catch (e) {
+                console.error('Failed to load task page:', e);
+                this.error = e.message;
+                this.loading = false;
+            }
+        },
+
+        /**
+         * Render task page HTML in iframe with injected config
+         */
+        async renderInIframe() {
+            const iframe = this.$refs.taskFrame;
+            if (!iframe || !this.taskPageHtml) return;
+
+            const deviceToken = await db.getOrCreateDeviceToken();
+
+            // Inject config into HTML
+            let html = this.taskPageHtml;
+            html = html.replace(/\{\{device_token\}\}/g, deviceToken);
+            html = html.replace(/\{\{task_page_id\}\}/g, this.taskPageId);
+            html = html.replace(/\{\{api_base\}\}/g, '/api');
+
+            // Use srcdoc to render
+            iframe.srcdoc = html;
+        },
+
+        /**
+         * Update task page status (locally and queue for sync)
+         */
+        async updateStatus(newStatus) {
+            if (!this.taskPageId) return;
+
+            try {
+                // Update locally
+                this.status = await db.updateTaskPageStatus(this.taskPageId, newStatus);
+
+                // Queue for sync if online, otherwise just save locally
+                if (navigator.onLine) {
+                    const deviceToken = await db.getOrCreateDeviceToken();
+                    await fetch(`/api/task-pages/${this.taskPageId}/status`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Device-Token': deviceToken
+                        },
+                        body: JSON.stringify({ status: newStatus })
+                    });
+                } else {
+                    // Queue for later sync
+                    await db.queueTaskUpdate(this.taskPageId, newStatus);
+                }
+
+                console.log('Task page status updated:', newStatus);
+            } catch (e) {
+                console.error('Failed to update status:', e);
+            }
+        },
+
+        /**
+         * Get status badge class
+         */
+        getStatusBadgeClass(status) {
+            const classes = {
+                'not_started': 'bg-gray-100 text-gray-600',
+                'draft': 'bg-amber-100 text-amber-700',
+                'in_progress': 'bg-blue-100 text-blue-700',
+                'completed': 'bg-green-100 text-green-700'
+            };
+            return classes[status] || classes['not_started'];
+        },
+
+        /**
+         * Get status display text
+         */
+        getStatusText(status) {
+            const texts = {
+                'not_started': 'Nicht gestartet',
+                'draft': 'Entwurf',
+                'in_progress': 'In Bearbeitung',
+                'completed': 'Abgeschlossen'
+            };
+            return texts[status] || texts['not_started'];
+        }
+    };
+}
+
+/**
+ * Task pages list component
+ * Shows available task pages with their statuses
+ */
+export function taskPagesList() {
+    return {
+        taskPages: [],
+        loading: true,
+        error: null,
+
+        async init() {
+            await this.loadTaskPages();
+        },
+
+        async loadTaskPages() {
+            this.loading = true;
+            this.error = null;
+
+            try {
+                const deviceToken = await db.getOrCreateDeviceToken();
+
+                // Fetch from server
+                const response = await fetch('/api/task-pages', {
+                    headers: { 'X-Device-Token': deviceToken }
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to fetch task pages');
+                }
+
+                const data = await response.json();
+                this.taskPages = data.task_pages || [];
+
+                // Cache task pages locally (unwrap Alpine proxies via JSON roundtrip)
+                const plainTaskPages = JSON.parse(JSON.stringify(this.taskPages));
+                await db.saveTaskPages(plainTaskPages);
+
+                // Also save statuses locally
+                const statuses = plainTaskPages
+                    .filter(tp => tp.status)
+                    .map(tp => ({
+                        task_page_id: tp.id,
+                        status: tp.status.status,
+                        started_at: tp.status.started_at,
+                        completed_at: tp.status.completed_at,
+                        updated_at: tp.status.updated_at
+                    }));
+                if (statuses.length > 0) {
+                    await db.saveTaskPageStatuses(statuses);
+                }
+
+            } catch (e) {
+                console.error('Failed to load task pages:', e);
+                this.error = e.message;
+
+                // Try to load from cache
+                this.taskPages = await db.getAllTaskPages();
+            } finally {
+                this.loading = false;
+            }
+        },
+
+        getStatusBadgeClass(taskPage) {
+            const status = taskPage.status?.status || 'not_started';
+            const classes = {
+                'not_started': 'bg-gray-100 text-gray-600',
+                'draft': 'bg-amber-100 text-amber-700',
+                'in_progress': 'bg-blue-100 text-blue-700',
+                'completed': 'bg-green-100 text-green-700'
+            };
+            return classes[status] || classes['not_started'];
+        },
+
+        getStatusText(taskPage) {
+            const status = taskPage.status?.status || 'not_started';
+            const texts = {
+                'not_started': 'Nicht gestartet',
+                'draft': 'Entwurf',
+                'in_progress': 'In Bearbeitung',
+                'completed': 'Abgeschlossen'
+            };
+            return texts[status] || texts['not_started'];
         }
     };
 }
@@ -365,3 +992,5 @@ export function learningApp() {
 // Make components available globally for Alpine
 window.cardResponse = cardResponse;
 window.learningApp = learningApp;
+window.taskPageView = taskPageView;
+window.taskPagesList = taskPagesList;

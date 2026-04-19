@@ -202,6 +202,189 @@ def init_db():
                 END $$;
             """)
 
+            # ==========================================================
+            # COURSES - Course filtering system
+            # ==========================================================
+            print("Creating courses table...", file=sys.stderr)
+
+            # Courses table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS courses (
+                    id SERIAL PRIMARY KEY,
+                    slug VARCHAR(64) UNIQUE NOT NULL,
+                    name VARCHAR(255) NOT NULL,
+                    description TEXT
+                )
+            """)
+
+            # Migration: Add course_id column to cards
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'cards' AND column_name = 'course_id'
+                    ) THEN
+                        ALTER TABLE cards ADD COLUMN course_id INTEGER REFERENCES courses(id);
+                    END IF;
+                END $$;
+            """)
+
+            # Seed default courses if they don't exist
+            cur.execute("""
+                INSERT INTO courses (slug, name, description)
+                VALUES ('sociology', 'Soziologie', 'Einführung in die Soziologie - Übungen A, B, C, etc.')
+                ON CONFLICT (slug) DO NOTHING
+            """)
+            cur.execute("""
+                INSERT INTO courses (slug, name, description)
+                VALUES ('ml-basics', 'ML Basics', 'Machine Learning fundamentals - Hello World Model')
+                ON CONFLICT (slug) DO NOTHING
+            """)
+
+            # Migrate existing cards to courses based on course_task_ref
+            # Cards with ml-* refs go to ml-basics, others go to sociology
+            cur.execute("""
+                UPDATE cards
+                SET course_id = (SELECT id FROM courses WHERE slug = 'ml-basics')
+                WHERE course_id IS NULL
+                  AND (course_task_ref LIKE 'ml-%' OR semantic_description LIKE 'ML %')
+            """)
+            cur.execute("""
+                UPDATE cards
+                SET course_id = (SELECT id FROM courses WHERE slug = 'sociology')
+                WHERE course_id IS NULL
+            """)
+
+            print("Courses setup done", file=sys.stderr)
+
+            # ==========================================================
+            # TASK PAGES TABLES
+            # ==========================================================
+            print("Creating task_pages tables...", file=sys.stderr)
+
+            # Task pages table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS task_pages (
+                    id VARCHAR(64) PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    title VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    page_html TEXT NOT NULL,
+                    course_id INTEGER REFERENCES courses(id),
+                    topics TEXT[],
+                    estimated_duration_minutes INTEGER,
+                    difficulty VARCHAR(20),
+                    generation_batch VARCHAR(64)
+                )
+            """)
+
+            # Task page statuses table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS task_page_statuses (
+                    id SERIAL PRIMARY KEY,
+                    task_page_id VARCHAR(64) REFERENCES task_pages(id) ON DELETE CASCADE,
+                    device_token VARCHAR(64) NOT NULL,
+                    status VARCHAR(20) DEFAULT 'not_started',
+                    started_at TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    notes TEXT,
+                    UNIQUE(task_page_id, device_token)
+                )
+            """)
+
+            # Task page responses table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS task_page_responses (
+                    id SERIAL PRIMARY KEY,
+                    task_page_id VARCHAR(64) REFERENCES task_pages(id) ON DELETE CASCADE,
+                    device_token VARCHAR(64) NOT NULL,
+                    submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    response_content JSONB NOT NULL,
+                    evaluation JSONB,
+                    evaluated_at TIMESTAMP
+                )
+            """)
+
+            # Migration: Add task_page_id to cards table
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'cards' AND column_name = 'task_page_id'
+                    ) THEN
+                        ALTER TABLE cards ADD COLUMN task_page_id VARCHAR(64);
+                    END IF;
+                END $$;
+            """)
+
+            # Add FK constraint if it doesn't exist
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.table_constraints
+                        WHERE constraint_name = 'cards_task_page_id_fkey'
+                    ) THEN
+                        ALTER TABLE cards ADD CONSTRAINT cards_task_page_id_fkey
+                        FOREIGN KEY (task_page_id) REFERENCES task_pages(id);
+                    END IF;
+                EXCEPTION
+                    WHEN duplicate_object THEN NULL;
+                END $$;
+            """)
+
+            print("Task pages tables created", file=sys.stderr)
+
+            # ==========================================================
+            # TAGS - Content block filtering system
+            # ==========================================================
+            print("Adding tags columns...", file=sys.stderr)
+
+            # Migration: Add tags column to cards
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'cards' AND column_name = 'tags'
+                    ) THEN
+                        ALTER TABLE cards ADD COLUMN tags TEXT[];
+                    END IF;
+                END $$;
+            """)
+
+            # Migration: Add tags column to task_pages
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'task_pages' AND column_name = 'tags'
+                    ) THEN
+                        ALTER TABLE task_pages ADD COLUMN tags TEXT[];
+                    END IF;
+                END $$;
+            """)
+
+            # Create GIN indexes for tags arrays
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_cards_tags ON cards USING GIN(tags)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_task_pages_tags ON task_pages USING GIN(tags)
+            """)
+
+            # Migrate existing cards to first block tag
+            cur.execute("""
+                UPDATE cards SET tags = ARRAY['Week 1-2'] WHERE tags IS NULL
+            """)
+
+            print("Tags setup done", file=sys.stderr)
+
             print("Migrations done, creating indexes...", file=sys.stderr)
 
             # ==========================================================
@@ -277,6 +460,53 @@ def index():
 # PUBLIC API - No authentication required
 # ==========================================================
 
+@app.route("/api/courses")
+def api_courses():
+    """Get available courses."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, slug, name, description
+                FROM courses
+                ORDER BY name ASC
+            """)
+            rows = cur.fetchall()
+
+            courses = []
+            for row in rows:
+                courses.append({
+                    "id": row[0],
+                    "slug": row[1],
+                    "name": row[2],
+                    "description": row[3]
+                })
+
+            return jsonify({
+                "courses": courses
+            })
+
+
+@app.route("/api/tags")
+def api_tags():
+    """Get distinct tags from cards and task_pages."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Get distinct tags from both tables
+            cur.execute("""
+                SELECT DISTINCT unnest(tags) as tag FROM cards WHERE tags IS NOT NULL
+                UNION
+                SELECT DISTINCT unnest(tags) as tag FROM task_pages WHERE tags IS NOT NULL
+                ORDER BY tag ASC
+            """)
+            rows = cur.fetchall()
+
+            tags = [row[0] for row in rows]
+
+            return jsonify({
+                "tags": tags
+            })
+
+
 @app.route("/api/cards")
 def api_cards():
     """Get cards - public cards and optionally device-specific private cards.
@@ -284,9 +514,13 @@ def api_cards():
     Query params:
     - device_token: Include private cards for this device
     - since: Only cards created after this ISO timestamp
+    - courses: Comma-separated course slugs to filter by (e.g., "sociology,ml-basics")
+    - tags: Comma-separated tags to filter by (e.g., "Week 1-2,Week 3-4"). Empty = show all
     """
     device_token = request.args.get("device_token")
     since = request.args.get("since")
+    courses_param = request.args.get("courses")
+    tags_param = request.args.get("tags")
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -294,31 +528,49 @@ def api_cards():
             if device_token:
                 # Return public cards + private cards for this device
                 query = """
-                    SELECT id, created_at, semantic_description, course_task_ref,
-                           card_html, response_schema, visibility, device_token,
-                           card_type, parent_response_id, generation_batch
-                    FROM cards
-                    WHERE visibility = 'public'
-                       OR device_token = %s
+                    SELECT c.id, c.created_at, c.semantic_description, c.course_task_ref,
+                           c.card_html, c.response_schema, c.visibility, c.device_token,
+                           c.card_type, c.parent_response_id, c.generation_batch, co.slug as course_slug,
+                           c.task_page_id, c.tags
+                    FROM cards c
+                    LEFT JOIN courses co ON c.course_id = co.id
+                    WHERE (c.visibility = 'public' OR c.device_token = %s)
                 """
                 params = [device_token]
             else:
                 # Return only public cards
                 query = """
-                    SELECT id, created_at, semantic_description, course_task_ref,
-                           card_html, response_schema, visibility, device_token,
-                           card_type, parent_response_id, generation_batch
-                    FROM cards
-                    WHERE visibility = 'public'
+                    SELECT c.id, c.created_at, c.semantic_description, c.course_task_ref,
+                           c.card_html, c.response_schema, c.visibility, c.device_token,
+                           c.card_type, c.parent_response_id, c.generation_batch, co.slug as course_slug,
+                           c.task_page_id, c.tags
+                    FROM cards c
+                    LEFT JOIN courses co ON c.course_id = co.id
+                    WHERE c.visibility = 'public'
                 """
                 params = []
 
+            # Filter by courses if provided
+            if courses_param:
+                course_slugs = [s.strip() for s in courses_param.split(",") if s.strip()]
+                if course_slugs:
+                    placeholders = ",".join(["%s"] * len(course_slugs))
+                    query += f" AND co.slug IN ({placeholders})"
+                    params.extend(course_slugs)
+
+            # Filter by tags if provided (PostgreSQL array overlap)
+            if tags_param:
+                tag_list = [t.strip() for t in tags_param.split(",") if t.strip()]
+                if tag_list:
+                    query += " AND c.tags && %s"
+                    params.append(tag_list)
+
             # Filter by timestamp if provided
             if since:
-                query += " AND created_at > %s"
+                query += " AND c.created_at > %s"
                 params.append(since)
 
-            query += " ORDER BY created_at ASC"
+            query += " ORDER BY c.created_at ASC"
 
             cur.execute(query, params)
             rows = cur.fetchall()
@@ -336,7 +588,10 @@ def api_cards():
                     "device_token": row[7],
                     "card_type": row[8],
                     "parent_response_id": row[9],
-                    "generation_batch": row[10]
+                    "generation_batch": row[10],
+                    "course_slug": row[11],
+                    "task_page_id": row[12],
+                    "tags": row[13] or []
                 })
 
             return jsonify({
@@ -437,7 +692,9 @@ def api_sync():
                 "feedback": { "rating": 4, "comment": "..." }  // optional
             }
         ],
-        "last_sync": "ISO timestamp" or null
+        "last_sync": "ISO timestamp" or null,
+        "subscribed_courses": ["sociology", "ml-basics"],  // optional, filter cards
+        "subscribed_tags": ["Week 1-2", "Week 3-4"]  // optional, filter by tags
     }
 
     Response:
@@ -460,6 +717,8 @@ def api_sync():
     device_token = data.get("device_token")
     responses = data.get("responses", [])
     last_sync = data.get("last_sync")
+    subscribed_courses = data.get("subscribed_courses")  # List of course slugs
+    subscribed_tags = data.get("subscribed_tags")  # List of tags
 
     if not device_token:
         return jsonify({"error": "Missing device_token"}), 400
@@ -504,29 +763,39 @@ def api_sync():
                         feedback.get("comment")
                     ))
 
-            # Get new cards since last sync
-            if last_sync:
-                cur.execute("""
-                    SELECT id, created_at, semantic_description, course_task_ref,
-                           card_html, response_schema, visibility, device_token,
-                           card_type, parent_response_id, generation_batch
-                    FROM cards
-                    WHERE (visibility = 'public' OR device_token = %s)
-                      AND created_at > %s
-                    ORDER BY created_at ASC
-                """, (device_token, last_sync))
-            else:
-                # First sync - get all available cards
-                cur.execute("""
-                    SELECT id, created_at, semantic_description, course_task_ref,
-                           card_html, response_schema, visibility, device_token,
-                           card_type, parent_response_id, generation_batch
-                    FROM cards
-                    WHERE visibility = 'public' OR device_token = %s
-                    ORDER BY created_at ASC
-                """, (device_token,))
+            # Build query for new cards with optional course and tag filtering
+            query = """
+                SELECT c.id, c.created_at, c.semantic_description, c.course_task_ref,
+                       c.card_html, c.response_schema, c.visibility, c.device_token,
+                       c.card_type, c.parent_response_id, c.generation_batch, co.slug as course_slug,
+                       c.tags
+                FROM cards c
+                LEFT JOIN courses co ON c.course_id = co.id
+                WHERE (c.visibility = 'public' OR c.device_token = %s)
+            """
+            params = [device_token]
 
+            # Filter by subscribed courses if provided
+            if subscribed_courses and isinstance(subscribed_courses, list) and len(subscribed_courses) > 0:
+                placeholders = ",".join(["%s"] * len(subscribed_courses))
+                query += f" AND co.slug IN ({placeholders})"
+                params.extend(subscribed_courses)
+
+            # Filter by subscribed tags if provided (PostgreSQL array overlap)
+            if subscribed_tags and isinstance(subscribed_tags, list) and len(subscribed_tags) > 0:
+                query += " AND c.tags && %s"
+                params.append(subscribed_tags)
+
+            # Filter by timestamp if provided
+            if last_sync:
+                query += " AND c.created_at > %s"
+                params.append(last_sync)
+
+            query += " ORDER BY c.created_at ASC"
+
+            cur.execute(query, params)
             rows = cur.fetchall()
+
             new_cards = []
             for row in rows:
                 new_cards.append({
@@ -540,16 +809,40 @@ def api_sync():
                     "device_token": row[7],
                     "card_type": row[8],
                     "parent_response_id": row[9],
-                    "generation_batch": row[10]
+                    "generation_batch": row[10],
+                    "course_slug": row[11],
+                    "tags": row[12] or []
                 })
 
-            # Get stats for this device
-            cur.execute("""
+            # Get stats for this device (filtered by subscribed courses and tags if provided)
+            stats_query_base = """
                 SELECT
                     (SELECT COUNT(*) FROM responses WHERE device_token = %s) as total_responses,
                     (SELECT COUNT(*) FROM responses WHERE device_token = %s AND evaluated = FALSE) as pending_evaluations,
-                    (SELECT COUNT(*) FROM cards WHERE visibility = 'public' OR device_token = %s) as cards_available
-            """, (device_token, device_token, device_token))
+            """
+            stats_params = [device_token, device_token]
+
+            # Build cards_available subquery with filters
+            cards_subquery = """
+                (SELECT COUNT(*) FROM cards c
+                 LEFT JOIN courses co ON c.course_id = co.id
+                 WHERE (c.visibility = 'public' OR c.device_token = %s)
+            """
+            stats_params.append(device_token)
+
+            if subscribed_courses and isinstance(subscribed_courses, list) and len(subscribed_courses) > 0:
+                placeholders = ",".join(["%s"] * len(subscribed_courses))
+                cards_subquery += f" AND co.slug IN ({placeholders})"
+                stats_params.extend(subscribed_courses)
+
+            if subscribed_tags and isinstance(subscribed_tags, list) and len(subscribed_tags) > 0:
+                cards_subquery += " AND c.tags && %s"
+                stats_params.append(subscribed_tags)
+
+            cards_subquery += ") as cards_available"
+
+            stats_query = stats_query_base + cards_subquery
+            cur.execute(stats_query, stats_params)
             stats_row = cur.fetchone()
 
         conn.commit()
@@ -564,6 +857,637 @@ def api_sync():
             "cards_available": stats_row[2]
         }
     })
+
+
+# ==========================================================
+# TASK PAGES API - Standalone learning content
+# ==========================================================
+
+@app.route("/api/task-pages")
+def api_task_pages():
+    """List task pages with optional filters.
+
+    Query params:
+    - course: Filter by course slug
+    - tags: Comma-separated tags to filter by (e.g., "Week 1-2,Week 3-4"). Empty = show all
+    - device_token: Include status for this device (via header or param)
+    """
+    course_slug = request.args.get("course")
+    tags_param = request.args.get("tags")
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Build query
+            query = """
+                SELECT tp.id, tp.created_at, tp.updated_at, tp.title, tp.description,
+                       tp.course_id, tp.topics, tp.estimated_duration_minutes,
+                       tp.difficulty, c.slug as course_slug, tp.tags
+                FROM task_pages tp
+                LEFT JOIN courses c ON tp.course_id = c.id
+                WHERE 1=1
+            """
+            params = []
+
+            if course_slug:
+                query += " AND c.slug = %s"
+                params.append(course_slug)
+
+            # Filter by tags if provided (PostgreSQL array overlap)
+            if tags_param:
+                tag_list = [t.strip() for t in tags_param.split(",") if t.strip()]
+                if tag_list:
+                    query += " AND tp.tags && %s"
+                    params.append(tag_list)
+
+            query += " ORDER BY tp.created_at DESC"
+
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+            task_pages = []
+            for row in rows:
+                page = {
+                    "id": row[0],
+                    "created_at": row[1].isoformat() if row[1] else None,
+                    "updated_at": row[2].isoformat() if row[2] else None,
+                    "title": row[3],
+                    "description": row[4],
+                    "course_id": row[5],
+                    "topics": row[6] or [],
+                    "estimated_duration_minutes": row[7],
+                    "difficulty": row[8],
+                    "course_slug": row[9],
+                    "tags": row[10] or []
+                }
+
+                # Get status for device if token provided
+                if device_token:
+                    cur.execute("""
+                        SELECT status, started_at, completed_at, updated_at
+                        FROM task_page_statuses
+                        WHERE task_page_id = %s AND device_token = %s
+                    """, (row[0], device_token))
+                    status_row = cur.fetchone()
+                    if status_row:
+                        page["status"] = {
+                            "status": status_row[0],
+                            "started_at": status_row[1].isoformat() if status_row[1] else None,
+                            "completed_at": status_row[2].isoformat() if status_row[2] else None,
+                            "updated_at": status_row[3].isoformat() if status_row[3] else None
+                        }
+                    else:
+                        page["status"] = {"status": "not_started"}
+
+                task_pages.append(page)
+
+            return jsonify({
+                "task_pages": task_pages,
+                "count": len(task_pages)
+            })
+
+
+@app.route("/api/task-pages/<task_page_id>")
+def api_task_page(task_page_id):
+    """Get a single task page with status.
+
+    Query params / Headers:
+    - device_token / X-Device-Token: Get status for this device
+    """
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT tp.id, tp.created_at, tp.updated_at, tp.title, tp.description,
+                       tp.page_html, tp.course_id, tp.topics, tp.estimated_duration_minutes,
+                       tp.difficulty, tp.generation_batch, c.slug as course_slug
+                FROM task_pages tp
+                LEFT JOIN courses c ON tp.course_id = c.id
+                WHERE tp.id = %s
+            """, (task_page_id,))
+            row = cur.fetchone()
+
+            if not row:
+                return jsonify({"error": "Task page not found"}), 404
+
+            page = {
+                "id": row[0],
+                "created_at": row[1].isoformat() if row[1] else None,
+                "updated_at": row[2].isoformat() if row[2] else None,
+                "title": row[3],
+                "description": row[4],
+                "has_html": bool(row[5]),  # Don't include full HTML here
+                "course_id": row[6],
+                "topics": row[7] or [],
+                "estimated_duration_minutes": row[8],
+                "difficulty": row[9],
+                "generation_batch": row[10],
+                "course_slug": row[11]
+            }
+
+            # Get status for device if token provided
+            if device_token:
+                cur.execute("""
+                    SELECT status, started_at, completed_at, updated_at, notes
+                    FROM task_page_statuses
+                    WHERE task_page_id = %s AND device_token = %s
+                """, (task_page_id, device_token))
+                status_row = cur.fetchone()
+                if status_row:
+                    page["status"] = {
+                        "status": status_row[0],
+                        "started_at": status_row[1].isoformat() if status_row[1] else None,
+                        "completed_at": status_row[2].isoformat() if status_row[2] else None,
+                        "updated_at": status_row[3].isoformat() if status_row[3] else None,
+                        "notes": status_row[4]
+                    }
+                else:
+                    page["status"] = {"status": "not_started"}
+
+                # Check if evaluation exists
+                cur.execute("""
+                    SELECT COUNT(*) FROM task_page_responses
+                    WHERE task_page_id = %s AND device_token = %s AND evaluation IS NOT NULL
+                """, (task_page_id, device_token))
+                page["has_evaluation"] = cur.fetchone()[0] > 0
+
+            return jsonify(page)
+
+
+@app.route("/api/task-pages/<task_page_id>/html")
+def api_task_page_html(task_page_id):
+    """Get raw HTML for a task page (for iframe rendering).
+
+    This returns just the HTML content, not JSON.
+    The PWA will inject device_token before rendering.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT page_html FROM task_pages WHERE id = %s
+            """, (task_page_id,))
+            row = cur.fetchone()
+
+            if not row:
+                return "Task page not found", 404
+
+            return row[0], 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/api/task-pages/<task_page_id>/status", methods=["GET", "POST"])
+def api_task_page_status(task_page_id):
+    """Get or update status for a task page.
+
+    GET: Returns current status for device
+    POST: Updates status
+
+    Headers:
+    - X-Device-Token: Required
+
+    POST body:
+    {
+        "status": "not_started" | "draft" | "in_progress" | "completed",
+        "notes": "optional notes"
+    }
+    """
+    device_token = request.headers.get("X-Device-Token")
+    if not device_token:
+        return jsonify({"error": "Missing X-Device-Token header"}), 401
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify task page exists
+            cur.execute("SELECT id FROM task_pages WHERE id = %s", (task_page_id,))
+            if not cur.fetchone():
+                return jsonify({"error": "Task page not found"}), 404
+
+            if request.method == "GET":
+                cur.execute("""
+                    SELECT status, started_at, completed_at, updated_at, notes
+                    FROM task_page_statuses
+                    WHERE task_page_id = %s AND device_token = %s
+                """, (task_page_id, device_token))
+                row = cur.fetchone()
+
+                if row:
+                    return jsonify({
+                        "status": row[0],
+                        "started_at": row[1].isoformat() if row[1] else None,
+                        "completed_at": row[2].isoformat() if row[2] else None,
+                        "updated_at": row[3].isoformat() if row[3] else None,
+                        "notes": row[4]
+                    })
+                else:
+                    return jsonify({"status": "not_started"})
+
+            else:  # POST
+                data = request.get_json()
+                if not data:
+                    return jsonify({"error": "No data provided"}), 400
+
+                new_status = data.get("status")
+                notes = data.get("notes")
+
+                valid_statuses = ["not_started", "draft", "in_progress", "completed"]
+                if new_status and new_status not in valid_statuses:
+                    return jsonify({"error": f"Invalid status. Must be one of: {valid_statuses}"}), 400
+
+                # Check if status record exists
+                cur.execute("""
+                    SELECT id, status FROM task_page_statuses
+                    WHERE task_page_id = %s AND device_token = %s
+                """, (task_page_id, device_token))
+                existing = cur.fetchone()
+
+                now = datetime.utcnow()
+
+                if existing:
+                    # Update existing status
+                    update_fields = ["updated_at = %s"]
+                    update_params = [now]
+
+                    if new_status:
+                        update_fields.append("status = %s")
+                        update_params.append(new_status)
+
+                        # Set timestamps based on status transitions
+                        old_status = existing[1]
+                        if new_status in ["draft", "in_progress"] and old_status == "not_started":
+                            update_fields.append("started_at = %s")
+                            update_params.append(now)
+                        if new_status == "completed":
+                            update_fields.append("completed_at = %s")
+                            update_params.append(now)
+
+                    if notes is not None:
+                        update_fields.append("notes = %s")
+                        update_params.append(notes)
+
+                    update_params.append(existing[0])
+                    cur.execute(f"""
+                        UPDATE task_page_statuses
+                        SET {", ".join(update_fields)}
+                        WHERE id = %s
+                    """, update_params)
+                else:
+                    # Create new status record
+                    started_at = now if new_status in ["draft", "in_progress", "completed"] else None
+                    completed_at = now if new_status == "completed" else None
+
+                    cur.execute("""
+                        INSERT INTO task_page_statuses
+                        (task_page_id, device_token, status, started_at, completed_at, updated_at, notes)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        task_page_id,
+                        device_token,
+                        new_status or "not_started",
+                        started_at,
+                        completed_at,
+                        now,
+                        notes
+                    ))
+
+                conn.commit()
+
+                # Return updated status
+                cur.execute("""
+                    SELECT status, started_at, completed_at, updated_at, notes
+                    FROM task_page_statuses
+                    WHERE task_page_id = %s AND device_token = %s
+                """, (task_page_id, device_token))
+                row = cur.fetchone()
+
+                return jsonify({
+                    "success": True,
+                    "status": row[0],
+                    "started_at": row[1].isoformat() if row[1] else None,
+                    "completed_at": row[2].isoformat() if row[2] else None,
+                    "updated_at": row[3].isoformat() if row[3] else None,
+                    "notes": row[4]
+                })
+
+
+@app.route("/api/task-pages/<task_page_id>/response", methods=["POST"])
+def task_page_submit_response(task_page_id):
+    """Submit a response for a task page."""
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+    if not device_token:
+        return jsonify({"error": "Device token required"}), 401
+
+    data = request.get_json()
+    if not data or "response_content" not in data:
+        return jsonify({"error": "response_content is required"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify task page exists
+            cur.execute("SELECT id FROM task_pages WHERE id = %s", (task_page_id,))
+            if not cur.fetchone():
+                return jsonify({"error": "Task page not found"}), 404
+
+            # Insert response
+            cur.execute("""
+                INSERT INTO task_page_responses
+                (task_page_id, device_token, response_content)
+                VALUES (%s, %s, %s)
+                RETURNING id, submitted_at
+            """, (task_page_id, device_token, json.dumps(data["response_content"])))
+            row = cur.fetchone()
+            conn.commit()
+
+            return jsonify({
+                "success": True,
+                "response_id": row[0],
+                "submitted_at": row[1].isoformat() if row[1] else None
+            })
+
+
+@app.route("/api/task-pages/<task_page_id>/responses", methods=["GET"])
+def task_page_get_responses(task_page_id):
+    """Get all responses for a task page for the current device."""
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+    if not device_token:
+        return jsonify({"error": "Device token required"}), 401
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify task page exists
+            cur.execute("SELECT id FROM task_pages WHERE id = %s", (task_page_id,))
+            if not cur.fetchone():
+                return jsonify({"error": "Task page not found"}), 404
+
+            cur.execute("""
+                SELECT id, submitted_at, response_content, evaluation, evaluated_at
+                FROM task_page_responses
+                WHERE task_page_id = %s AND device_token = %s
+                ORDER BY submitted_at DESC
+            """, (task_page_id, device_token))
+            rows = cur.fetchall()
+
+            responses = []
+            for row in rows:
+                responses.append({
+                    "id": row[0],
+                    "submitted_at": row[1].isoformat() if row[1] else None,
+                    "response_content": row[2],
+                    "evaluation": row[3],
+                    "evaluated_at": row[4].isoformat() if row[4] else None,
+                    "has_evaluation": row[3] is not None
+                })
+
+            return jsonify({"responses": responses})
+
+
+@app.route("/api/task-pages/<task_page_id>/evaluation", methods=["GET"])
+def task_page_get_evaluation(task_page_id):
+    """Get the latest evaluation for a task page response."""
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+    if not device_token:
+        return jsonify({"error": "Device token required"}), 401
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify task page exists
+            cur.execute("SELECT id FROM task_pages WHERE id = %s", (task_page_id,))
+            if not cur.fetchone():
+                return jsonify({"error": "Task page not found"}), 404
+
+            # Get the most recent response with an evaluation
+            cur.execute("""
+                SELECT id, submitted_at, response_content, evaluation, evaluated_at
+                FROM task_page_responses
+                WHERE task_page_id = %s AND device_token = %s AND evaluation IS NOT NULL
+                ORDER BY evaluated_at DESC
+                LIMIT 1
+            """, (task_page_id, device_token))
+            row = cur.fetchone()
+
+            if not row:
+                return jsonify({"has_evaluation": False, "evaluation": None})
+
+            return jsonify({
+                "has_evaluation": True,
+                "response_id": row[0],
+                "submitted_at": row[1].isoformat() if row[1] else None,
+                "response_content": row[2],
+                "evaluation": row[3],
+                "evaluated_at": row[4].isoformat() if row[4] else None
+            })
+
+
+@app.route("/api/task-pages/statuses", methods=["POST"])
+def task_pages_batch_statuses():
+    """Get statuses for multiple task pages in a single request (for PWA sync)."""
+    device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
+    if not device_token:
+        return jsonify({"error": "Device token required"}), 401
+
+    data = request.get_json()
+    if not data or "task_page_ids" not in data:
+        return jsonify({"error": "task_page_ids array is required"}), 400
+
+    task_page_ids = data["task_page_ids"]
+    if not isinstance(task_page_ids, list) or len(task_page_ids) == 0:
+        return jsonify({"error": "task_page_ids must be a non-empty array"}), 400
+
+    # Limit batch size to prevent abuse
+    if len(task_page_ids) > 100:
+        return jsonify({"error": "Maximum 100 task page IDs per request"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Get statuses for all requested task pages
+            placeholders = ",".join(["%s"] * len(task_page_ids))
+            cur.execute(f"""
+                SELECT task_page_id, status, started_at, completed_at, updated_at
+                FROM task_page_statuses
+                WHERE task_page_id IN ({placeholders}) AND device_token = %s
+            """, (*task_page_ids, device_token))
+            rows = cur.fetchall()
+
+            # Build lookup dict
+            statuses_by_id = {}
+            for row in rows:
+                statuses_by_id[row[0]] = {
+                    "task_page_id": row[0],
+                    "status": row[1],
+                    "started_at": row[2].isoformat() if row[2] else None,
+                    "completed_at": row[3].isoformat() if row[3] else None,
+                    "updated_at": row[4].isoformat() if row[4] else None
+                }
+
+            # Return statuses for all requested IDs (default to not_started)
+            statuses = []
+            for page_id in task_page_ids:
+                if page_id in statuses_by_id:
+                    statuses.append(statuses_by_id[page_id])
+                else:
+                    statuses.append({
+                        "task_page_id": page_id,
+                        "status": "not_started",
+                        "started_at": None,
+                        "completed_at": None,
+                        "updated_at": None
+                    })
+
+            return jsonify({"statuses": statuses})
+
+
+# ==========================================================
+# ADMIN/SEED ENDPOINTS (staging only)
+# ==========================================================
+
+SAMPLE_TASK_PAGE_HTML = """<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Soziologische Grundbegriffe</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+window.COMMUTE_CONFIG = {
+    deviceToken: '{{device_token}}',
+    taskPageId: '{{task_page_id}}',
+    apiBase: '{{api_base}}'
+};
+</script>
+<script src="/static/js/task-api.js"></script>
+</head>
+<body class="bg-gray-50 p-4">
+<div class="max-w-2xl mx-auto">
+<h1 class="text-2xl font-bold text-gray-800 mb-4">Soziologische Grundbegriffe</h1>
+<div class="bg-white rounded-lg shadow-sm p-6 mb-4">
+<h2 class="text-lg font-semibold text-gray-700 mb-3">Aufgabe</h2>
+<p class="text-gray-600 mb-4">Erklaere die folgenden soziologischen Grundbegriffe in eigenen Worten:</p>
+<div class="space-y-4">
+<div>
+<label class="block text-sm font-medium text-gray-700 mb-1">1. Was versteht man unter "Sozialisation"?</label>
+<textarea id="answer1" rows="3" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="Deine Antwort..."></textarea>
+</div>
+<div>
+<label class="block text-sm font-medium text-gray-700 mb-1">2. Erklaere den Begriff "soziale Rolle"</label>
+<textarea id="answer2" rows="3" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="Deine Antwort..."></textarea>
+</div>
+<div>
+<label class="block text-sm font-medium text-gray-700 mb-1">3. Was bedeutet "soziale Schichtung"?</label>
+<textarea id="answer3" rows="3" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="Deine Antwort..."></textarea>
+</div>
+</div>
+</div>
+<div class="flex gap-3">
+<button onclick="saveDraft()" class="flex-1 py-3 bg-amber-100 text-amber-700 rounded-lg font-medium hover:bg-amber-200">Entwurf speichern</button>
+<button onclick="submitAnswers()" class="flex-1 py-3 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700">Abschicken</button>
+</div>
+<div id="status" class="mt-4 text-center text-sm text-gray-500"></div>
+</div>
+<script>
+// Restore draft on page load
+document.addEventListener('DOMContentLoaded', async function() {
+    try {
+        const status = await TaskAPI.getStatus();
+        if (status.notes) {
+            const saved = JSON.parse(status.notes);
+            if (saved.answer1) document.getElementById('answer1').value = saved.answer1;
+            if (saved.answer2) document.getElementById('answer2').value = saved.answer2;
+            if (saved.answer3) document.getElementById('answer3').value = saved.answer3;
+            showStatus('Entwurf wiederhergestellt', 'success');
+        }
+    } catch (e) {
+        console.log('No draft to restore:', e);
+    }
+});
+
+async function saveDraft() {
+    const answers = getAnswers();
+    await TaskAPI.saveDraft(JSON.stringify(answers));
+    showStatus('Entwurf gespeichert!', 'success');
+}
+
+async function submitAnswers() {
+    const answers = getAnswers();
+    if (!answers.answer1 && !answers.answer2 && !answers.answer3) {
+        showStatus('Bitte mindestens eine Frage beantworten', 'error');
+        return;
+    }
+    const result = await TaskAPI.submitResponse(answers);
+    if (result.success) {
+        await TaskAPI.complete();
+        showStatus('Antworten abgeschickt!', 'success');
+    } else {
+        showStatus('Fehler: ' + (result.error || 'Unbekannt'), 'error');
+    }
+}
+
+function getAnswers() {
+    return {
+        answer1: document.getElementById('answer1').value,
+        answer2: document.getElementById('answer2').value,
+        answer3: document.getElementById('answer3').value
+    };
+}
+
+function showStatus(message, type) {
+    const el = document.getElementById('status');
+    el.textContent = message;
+    el.className = 'mt-4 text-center text-sm ' + (type === 'success' ? 'text-green-600' : 'text-red-600');
+}
+</script>
+</body>
+</html>"""
+
+
+@app.route("/api/admin/seed-task-pages", methods=["POST"])
+def admin_seed_task_pages():
+    """Seed sample task pages and task_reference cards (staging only)."""
+    if not is_staging():
+        return jsonify({"error": "Only available in staging"}), 403
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Seed sample task page
+            cur.execute("""
+                INSERT INTO task_pages (id, title, description, page_html, course_id, topics, estimated_duration_minutes, difficulty)
+                VALUES (%s, %s, %s, %s, 1, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    page_html = EXCLUDED.page_html,
+                    estimated_duration_minutes = EXCLUDED.estimated_duration_minutes,
+                    difficulty = EXCLUDED.difficulty,
+                    updated_at = NOW()
+            """, (
+                'test-task-page-1',
+                'Soziologische Grundbegriffe',
+                'Erklaere wichtige soziologische Konzepte wie Sozialisation, soziale Rolle und soziale Schichtung in eigenen Worten.',
+                SAMPLE_TASK_PAGE_HTML,
+                ['grundbegriffe', 'sozialisation', 'soziale-rolle'],
+                15,
+                'beginner'
+            ))
+
+            # Seed task_reference card pointing to the task page
+            # First check if one exists
+            cur.execute("""
+                SELECT id FROM cards WHERE card_type = 'task_reference' AND task_page_id = %s
+            """, ('test-task-page-1',))
+            if not cur.fetchone():
+                # card_html and response_schema are required, so we provide placeholders
+                cur.execute("""
+                    INSERT INTO cards (card_type, task_page_id, course_id, semantic_description, visibility, card_html, response_schema)
+                    VALUES (%s, %s, 1, %s, %s, %s, %s)
+                """, (
+                    'task_reference',
+                    'test-task-page-1',
+                    'Aufgabe: Soziologische Grundbegriffe erklaeren',
+                    'public',
+                    '',  # Empty card_html for task_reference
+                    '{}'  # Empty response_schema for task_reference
+                ))
+
+            conn.commit()
+            return jsonify({"success": True, "message": "Task pages and task_reference card seeded"})
 
 
 # ==========================================================
