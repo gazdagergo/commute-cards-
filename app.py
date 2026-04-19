@@ -1193,6 +1193,22 @@ window.COMMUTE_CONFIG = {
 <div id="status" class="mt-4 text-center text-sm text-gray-500"></div>
 </div>
 <script>
+// Restore draft on page load
+document.addEventListener('DOMContentLoaded', async function() {
+    try {
+        const status = await TaskAPI.getStatus();
+        if (status.notes) {
+            const saved = JSON.parse(status.notes);
+            if (saved.answer1) document.getElementById('answer1').value = saved.answer1;
+            if (saved.answer2) document.getElementById('answer2').value = saved.answer2;
+            if (saved.answer3) document.getElementById('answer3').value = saved.answer3;
+            showStatus('Entwurf wiederhergestellt', 'success');
+        }
+    } catch (e) {
+        console.log('No draft to restore:', e);
+    }
+});
+
 async function saveDraft() {
     const answers = getAnswers();
     await TaskAPI.saveDraft(JSON.stringify(answers));
