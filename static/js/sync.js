@@ -17,7 +17,8 @@ import {
     logSync,
     getCardCount,
     getPendingCount,
-    getSubscribedCourses
+    getSubscribedCourses,
+    getSubscribedTags
 } from './db.js';
 
 const API_BASE = '';  // Same origin
@@ -65,7 +66,7 @@ export async function updatePendingCount() {
 
 /**
  * Fetch initial cards (first load or cache refresh)
- * Only fetches cards from subscribed courses
+ * Only fetches cards from subscribed courses and tags
  */
 export async function fetchInitialCards() {
     if (!syncState.isOnline) {
@@ -76,11 +77,16 @@ export async function fetchInitialCards() {
     try {
         const deviceToken = await getOrCreateDeviceToken();
         const subscribedCourses = await getSubscribedCourses();
+        const subscribedTags = await getSubscribedTags();
 
-        // Build URL with course filter
+        // Build URL with course and tag filters
         let url = `${API_BASE}/api/cards?device_token=${encodeURIComponent(deviceToken)}`;
         if (subscribedCourses.length > 0) {
             url += `&courses=${encodeURIComponent(subscribedCourses.join(','))}`;
+        }
+        // Only add tags filter if tags are selected (empty = show all)
+        if (subscribedTags.length > 0) {
+            url += `&tags=${encodeURIComponent(subscribedTags.join(','))}`;
         }
 
         const response = await fetch(url);
@@ -94,7 +100,7 @@ export async function fetchInitialCards() {
 
         if (cards.length > 0) {
             await saveCards(cards);
-            console.log(`Cached ${cards.length} cards from courses: ${subscribedCourses.join(', ')}`);
+            console.log(`Cached ${cards.length} cards from courses: ${subscribedCourses.join(', ')}, tags: ${subscribedTags.length > 0 ? subscribedTags.join(', ') : 'all'}`);
         }
 
         return { success: true, count: cards.length };
@@ -130,6 +136,7 @@ export async function performSync() {
         const lastSync = await getLastSync();
         const pendingResponses = await getPendingResponses();
         const subscribedCourses = await getSubscribedCourses();
+        const subscribedTags = await getSubscribedTags();
 
         // Build sync request
         const syncRequest = {
@@ -141,10 +148,11 @@ export async function performSync() {
                 feedback: r.feedback
             })),
             last_sync: lastSync,
-            subscribed_courses: subscribedCourses
+            subscribed_courses: subscribedCourses,
+            subscribed_tags: subscribedTags.length > 0 ? subscribedTags : null  // null = show all
         };
 
-        console.log(`Syncing: ${pendingResponses.length} responses, courses: ${subscribedCourses.join(', ')}`);
+        console.log(`Syncing: ${pendingResponses.length} responses, courses: ${subscribedCourses.join(', ')}, tags: ${subscribedTags.length > 0 ? subscribedTags.join(', ') : 'all'}`);
 
         const response = await fetch(`${API_BASE}/api/sync`, {
             method: 'POST',

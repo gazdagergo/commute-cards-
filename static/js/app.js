@@ -144,10 +144,15 @@ export function learningApp() {
         settingsOpen: false,
         availableCourses: [],
         subscribedCourses: [],
+        availableTags: [],
+        subscribedTags: [],
 
         // Draft state
         currentDraft: null,
         savingDraft: false,
+
+        // Task reference card state
+        taskReferenceInfo: null,
 
         /**
          * Initialize on mount
@@ -156,8 +161,9 @@ export function learningApp() {
             await initApp();
             this.initialized = true;
 
-            // Load subscribed courses
+            // Load subscribed courses and tags
             this.subscribedCourses = await db.getSubscribedCourses();
+            this.subscribedTags = await db.getSubscribedTags();
 
             await this.loadNextCard();
         },
@@ -171,6 +177,7 @@ export function learningApp() {
             this.resetFeedback();
             this.closeNotesDrawer();
             this.currentDraft = null;
+            this.taskReferenceInfo = null;
 
             try {
                 // Get next card from local database
@@ -183,8 +190,13 @@ export function learningApp() {
                     this.currentCard = { ...card, notes };
                     this.currentDraft = draft;
 
-                    // If there's a draft, restore it after DOM updates
-                    if (draft) {
+                    // If this is a task reference card, load task page info
+                    if (card.card_type === 'task_reference' && card.task_page_id) {
+                        await this.loadTaskPageInfo();
+                    }
+
+                    // If there's a draft (for non-task-reference cards), restore it after DOM updates
+                    if (draft && card.card_type !== 'task_reference') {
                         this.$nextTick(() => this.restoreDraft());
                     }
                 } else {
@@ -394,15 +406,24 @@ export function learningApp() {
         async openSettings() {
             this.settingsOpen = true;
 
-            // Fetch available courses from server
+            // Fetch available courses and tags from server
             try {
-                const response = await fetch('/api/courses');
-                if (response.ok) {
-                    const data = await response.json();
+                const [coursesResponse, tagsResponse] = await Promise.all([
+                    fetch('/api/courses'),
+                    fetch('/api/tags')
+                ]);
+
+                if (coursesResponse.ok) {
+                    const data = await coursesResponse.json();
                     this.availableCourses = data.courses || [];
                 }
+
+                if (tagsResponse.ok) {
+                    const data = await tagsResponse.json();
+                    this.availableTags = data.tags || [];
+                }
             } catch (e) {
-                console.error('Failed to fetch courses:', e);
+                console.error('Failed to fetch settings data:', e);
             }
         },
 
@@ -437,6 +458,22 @@ export function learningApp() {
 
             // Reload current card
             await this.loadNextCard();
+        },
+
+        async toggleTag(tag) {
+            // Toggle in local state
+            const index = this.subscribedTags.indexOf(tag);
+            if (index >= 0) {
+                this.subscribedTags.splice(index, 1);
+            } else {
+                this.subscribedTags.push(tag);
+            }
+
+            // Persist to IndexedDB
+            await db.setSubscribedTags([...this.subscribedTags]);
+
+            // Clear local cards and re-fetch based on new tag selection
+            await this.refreshCardsForSubscriptions();
         },
 
         // =================================================================
@@ -553,6 +590,166 @@ export function learningApp() {
 
             await db.clearDraft(this.currentCard.id);
             this.currentDraft = null;
+        },
+
+        // =================================================================
+        // Task Reference Card methods
+        // =================================================================
+
+        /**
+         * Check if current card is a task reference
+         */
+        isTaskReference() {
+            return this.currentCard?.card_type === 'task_reference' && this.currentCard?.task_page_id;
+        },
+
+        /**
+         * Load task page info for task reference cards
+         */
+        async loadTaskPageInfo() {
+            if (!this.isTaskReference()) {
+                this.taskReferenceInfo = null;
+                return;
+            }
+
+            const taskPageId = this.currentCard.task_page_id;
+
+            try {
+                // Try cache first
+                let taskPage = await db.getTaskPage(taskPageId);
+
+                if (!taskPage) {
+                    // Fetch from server
+                    const deviceToken = await db.getOrCreateDeviceToken();
+                    const response = await fetch(`/api/task-pages/${taskPageId}`, {
+                        headers: { 'X-Device-Token': deviceToken }
+                    });
+
+                    if (response.ok) {
+                        taskPage = await response.json();
+                        await db.saveTaskPage(taskPage);
+                    }
+                }
+
+                // Get status
+                const status = await db.getTaskPageStatus(taskPageId);
+
+                this.taskReferenceInfo = {
+                    taskPage,
+                    status: status?.status || 'not_started'
+                };
+
+            } catch (e) {
+                console.error('Failed to load task page info:', e);
+                this.taskReferenceInfo = null;
+            }
+        },
+
+        /**
+         * Open the task page for current task reference card
+         * Switches to task pages tab and opens the detail view
+         */
+        openTaskPage() {
+            if (!this.isTaskReference()) return;
+
+            const taskPageId = this.currentCard.task_page_id;
+
+            // Switch to task pages tab
+            const taskPagesApp = document.getElementById('task-pages-app');
+            const learningAppEl = document.querySelector('[x-data*="learningApp"]');
+            const navButtons = document.querySelectorAll('nav button');
+
+            if (taskPagesApp && learningAppEl) {
+                // Hide learning app, show task pages app
+                learningAppEl.classList.add('hidden');
+                taskPagesApp.classList.remove('hidden');
+
+                // Update nav state
+                navButtons.forEach((btn, idx) => {
+                    if (idx === 0) btn.classList.remove('text-indigo-600');
+                    if (idx === 1) btn.classList.add('text-indigo-600');
+                });
+
+                // Set selected task page and view
+                const taskPagesData = Alpine.$data(taskPagesApp);
+                if (taskPagesData) {
+                    taskPagesData.selectedTaskPageId = taskPageId;
+                    taskPagesData.currentView = 'detail';
+                }
+            }
+        },
+
+        /**
+         * Mark task reference card as completed after task page is done
+         * Called when user completes the associated task page
+         */
+        async completeTaskReferenceCard() {
+            if (!this.isTaskReference()) return;
+
+            // Queue a minimal response indicating task completion
+            const localId = await db.queueResponse(this.currentCard.id, {
+                task_page_id: this.currentCard.task_page_id,
+                completed: true
+            });
+
+            await sync.updatePendingCount();
+
+            // Go to feedback screen
+            this.onCardSubmitted('Aufgabe abgeschlossen', localId);
+        },
+
+        /**
+         * Get status badge class for task reference
+         */
+        getTaskStatusBadgeClass(status) {
+            const classes = {
+                'not_started': 'bg-gray-100 text-gray-600',
+                'draft': 'bg-amber-100 text-amber-700',
+                'in_progress': 'bg-blue-100 text-blue-700',
+                'completed': 'bg-green-100 text-green-700'
+            };
+            return classes[status] || classes['not_started'];
+        },
+
+        /**
+         * Get status text for task reference
+         */
+        getTaskStatusText(status) {
+            const texts = {
+                'not_started': 'Nicht gestartet',
+                'draft': 'Entwurf',
+                'in_progress': 'In Bearbeitung',
+                'completed': 'Abgeschlossen'
+            };
+            return texts[status] || texts['not_started'];
+        },
+
+        /**
+         * Reset all local data (for testing)
+         */
+        async resetLocalData() {
+            if (!confirm('Alle lokalen Daten loeschen? Dies kann nicht rueckgaengig gemacht werden.')) {
+                return;
+            }
+
+            try {
+                // Delete IndexedDB database
+                await new Promise((resolve, reject) => {
+                    const request = indexedDB.deleteDatabase('sociology-learning');
+                    request.onsuccess = () => resolve();
+                    request.onerror = () => reject(request.error);
+                    request.onblocked = () => {
+                        console.warn('Database deletion blocked - please close other tabs');
+                        resolve();
+                    };
+                });
+
+                // Reload the page to reinitialize
+                window.location.reload();
+            } catch (e) {
+                console.error('Failed to reset data:', e);
+                alert('Fehler beim Zuruecksetzen: ' + e.message);
+            }
         }
     };
 }

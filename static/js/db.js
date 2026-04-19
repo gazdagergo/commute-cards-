@@ -222,6 +222,44 @@ export async function toggleCourseSubscription(courseSlug) {
 }
 
 // =============================================================================
+// TAG SUBSCRIPTIONS
+// =============================================================================
+
+/**
+ * Get subscribed tags
+ * Returns empty array if not set (empty = show all)
+ */
+export async function getSubscribedTags() {
+    const stored = await getConfig('subscribed_tags');
+    if (stored === undefined || stored === null) {
+        return [];  // Empty = show all
+    }
+    return stored;
+}
+
+/**
+ * Set subscribed tags
+ */
+export async function setSubscribedTags(tags) {
+    return await setConfig('subscribed_tags', tags);
+}
+
+/**
+ * Toggle tag subscription
+ */
+export async function toggleTagSubscription(tag) {
+    const subscribed = await getSubscribedTags();
+    const index = subscribed.indexOf(tag);
+    if (index >= 0) {
+        subscribed.splice(index, 1);
+    } else {
+        subscribed.push(tag);
+    }
+    await setSubscribedTags(subscribed);
+    return subscribed;
+}
+
+// =============================================================================
 // CARDS OPERATIONS
 // =============================================================================
 
