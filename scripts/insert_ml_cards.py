@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 """
 Insert ML learning cards (hello-world-model) into the database.
+
+Usage:
+    python scripts/insert_ml_cards.py | fly postgres connect -a sociology-pwa-db -d sociology_learning_pwa
+
+See CARD_CONVENTION.md and docs/CARD-CREATION-GUIDE.md for card creation guidelines.
 """
 
 import json
+
+# Default tag for all ML cards
+DEFAULT_TAGS = ["ML Basics"]
 
 cards = [
     # Card 1: Self-assessment - Why convert text to numbers
     {
         "semantic_description": "ML Basics Step 1: Understand why computers need text converted to numbers",
         "course_task_ref": "ml-step1",
+        "tags": ["ML Basics"],
         "card_html": '''<div x-data="cardResponse()" class="p-4">
     <div x-data="{ revealed: false, rating: null }">
         <p class="text-gray-600 text-sm mb-2">ML Fundamentals</p>
@@ -56,6 +65,7 @@ cards = [
     {
         "semantic_description": "ML Basics Step 2: Understand why one-hot encoding is needed instead of plain numbers",
         "course_task_ref": "ml-step2",
+        "tags": ["ML Basics"],
         "card_html": '''<div x-data="cardResponse()" class="p-4">
     <div x-data="{ selected: null }">
         <p class="text-gray-600 text-sm mb-2">Choose the correct answer</p>
@@ -99,6 +109,7 @@ cards = [
     {
         "semantic_description": "ML Basics Step 2: Understand one-hot vector structure",
         "course_task_ref": "ml-step2",
+        "tags": ["ML Basics"],
         "card_html": '''<div x-data="cardResponse()" class="p-4">
     <div x-data="{ revealed: false, rating: null }">
         <p class="text-gray-600 text-sm mb-2">ML Fundamentals</p>
@@ -151,6 +162,7 @@ cards = [
     {
         "semantic_description": "ML Basics Step 3: Understand dot product calculation",
         "course_task_ref": "ml-step3",
+        "tags": ["ML Basics"],
         "card_html": '''<div x-data="cardResponse()" class="p-4">
     <div x-data="{ answer: '' }">
         <p class="text-gray-600 text-sm mb-2">Fill in the missing number</p>
@@ -179,6 +191,7 @@ cards = [
     {
         "semantic_description": "ML Basics Step 3: Understand what dot product measures",
         "course_task_ref": "ml-step3",
+        "tags": ["ML Basics"],
         "card_html": '''<div x-data="cardResponse()" class="p-4">
     <div x-data="{ revealed: false, rating: null }">
         <p class="text-gray-600 text-sm mb-2">ML Fundamentals</p>
@@ -231,6 +244,7 @@ cards = [
     {
         "semantic_description": "ML Basics Step 4: Understand why activation functions are needed",
         "course_task_ref": "ml-step4",
+        "tags": ["ML Basics"],
         "card_html": '''<div x-data="cardResponse()" class="p-4">
     <div x-data="{ selected: null }">
         <p class="text-gray-600 text-sm mb-2">Choose the correct answer</p>
@@ -274,6 +288,7 @@ cards = [
     {
         "semantic_description": "ML Basics Step 4: Understand ReLU activation function",
         "course_task_ref": "ml-step4",
+        "tags": ["ML Basics"],
         "card_html": '''<div x-data="cardResponse()" class="p-4">
     <div x-data="{ revealed: false, rating: null }">
         <p class="text-gray-600 text-sm mb-2">ML Fundamentals</p>
@@ -323,6 +338,7 @@ cards = [
     {
         "semantic_description": "ML Basics Step 4: Calculate ReLU activation output",
         "course_task_ref": "ml-step4",
+        "tags": ["ML Basics"],
         "card_html": '''<div x-data="cardResponse()" class="p-4">
     <div x-data="{ answer: '' }">
         <p class="text-gray-600 text-sm mb-2">Fill in the missing value</p>
@@ -354,6 +370,7 @@ cards = [
     {
         "semantic_description": "ML Basics Step 4: Understand when to use Softmax activation",
         "course_task_ref": "ml-step4",
+        "tags": ["ML Basics"],
         "card_html": '''<div x-data="cardResponse()" class="p-4">
     <div x-data="{ selected: null }">
         <p class="text-gray-600 text-sm mb-2">Choose the correct answer</p>
@@ -397,6 +414,7 @@ cards = [
     {
         "semantic_description": "ML Basics: Explain the complete neuron computation formula",
         "course_task_ref": "ml-step4",
+        "tags": ["ML Basics"],
         "card_html": '''<div x-data="cardResponse()" class="p-4">
     <div x-data="{ answer: '' }">
         <p class="text-gray-600 text-sm mb-2">Learning goal: Understand complete neuron computation</p>
@@ -431,15 +449,18 @@ def generate_sql():
         ref_escaped = card["course_task_ref"].replace("'", "''")
         html_escaped = card["card_html"].replace("'", "''")
         schema_json = json.dumps(card["response_schema"]).replace("'", "''")
+        tags = card.get("tags", DEFAULT_TAGS)
+        tags_sql = "ARRAY[" + ", ".join(f"'{t}'" for t in tags) + "]"
 
-        sql = f"""INSERT INTO cards (semantic_description, course_task_ref, card_html, response_schema, visibility, card_type)
+        sql = f"""INSERT INTO cards (semantic_description, course_task_ref, card_html, response_schema, visibility, card_type, tags)
 VALUES (
     '{desc_escaped}',
     '{ref_escaped}',
     '{html_escaped}',
     '{schema_json}'::jsonb,
     'public',
-    'learning'
+    'learning',
+    {tags_sql}
 );"""
         sql_statements.append(sql)
 
