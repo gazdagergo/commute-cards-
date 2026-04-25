@@ -2,14 +2,20 @@
 
 This document describes the complete workflow for creating learning cards for the sociology PWA. It complements `CARD_CONVENTION.md` (technical HTML patterns) with methodology, workflow, and best practices.
 
+**Related Documentation:**
+- [CARD_CONVENTION.md](../CARD_CONVENTION.md) - Technical HTML patterns
+- [TASK-PAGES-ARCHITECTURE.md](TASK-PAGES-ARCHITECTURE.md) - Task pages system
+
 ## Table of Contents
 
 1. [Pre-Creation Workflow](#pre-creation-workflow)
 2. [Card Types & Use Cases](#card-types--use-cases)
-3. [Content Sources](#content-sources)
-4. [Creating Different Card Categories](#creating-different-card-categories)
-5. [Database Operations](#database-operations)
-6. [Best Practices & Lessons Learned](#best-practices--lessons-learned)
+3. [Tags & Content Filtering](#tags--content-filtering)
+4. [Task Pages](#task-pages)
+5. [Content Sources](#content-sources)
+6. [Creating Different Card Categories](#creating-different-card-categories)
+7. [Database Operations](#database-operations)
+8. [Best Practices & Lessons Learned](#best-practices--lessons-learned)
 
 ---
 
@@ -148,6 +154,231 @@ Based on Steps 1-3, identify:
 - Partial answers that need expansion
 - Connecting responses to source materials
 
+### 8. Task Reference Card
+
+**Use when:** Linking to a complex, interactive task page.
+
+**Structure:**
+- `card_type = 'task_reference'`
+- `task_page_id` set to the task page ID
+- Displays task title, description, and status
+- Button to open task page
+
+**Best for:**
+- Multi-step exercises (Übungen)
+- Research tasks with multiple inputs
+- Complex forms requiring draft saving
+- Tasks that benefit from full-page layout
+
+**Response data:** `{ action: 'open_task' }`
+
+---
+
+## Tags & Content Filtering
+
+Tags organize cards into content blocks (typically 2-week periods). Users can filter which blocks they see in the PWA settings.
+
+### Tag Convention
+
+| Tag | Period | Content |
+|-----|--------|---------|
+| `Week 1-2` | Weeks 1-2 | Initial course concepts, orientation |
+| `Week 3-4` | Weeks 3-4 | Übung A, research methods, literature |
+| `Week 5-6` | Weeks 5-6 | Übung B, deeper concepts |
+| `Week 7-8` | Weeks 7-8 | Advanced topics |
+| etc. | As needed | Continue pattern |
+
+### Adding Tags to Cards
+
+**Always include tags when creating cards:**
+
+```python
+card = {
+    "semantic_description": "...",
+    "card_html": "...",
+    "response_schema": {...},
+    "tags": ["Week 3-4"]  # Required!
+}
+```
+
+**SQL example:**
+
+```sql
+INSERT INTO cards (..., tags)
+VALUES (..., ARRAY['Week 3-4']);
+```
+
+### Querying Available Tags
+
+```bash
+# Via API
+curl https://sociology-learning-pwa.fly.dev/api/tags
+
+# Response: { "tags": ["Week 1-2", "Week 3-4", ...] }
+```
+
+### User Experience
+
+- Users select tags in Settings → "Wochen / Blöcke"
+- Empty selection = show all cards (no filter)
+- Selected tags filter both cards and task pages
+- Tags sync with server during normal sync
+
+---
+
+## Task Pages
+
+Task pages are standalone HTML documents for complex, interactive learning exercises. Unlike inline cards, they:
+
+- Render in an iframe (full page layout)
+- Support draft saving (user can resume later)
+- Handle response submission and completion
+- Can include forms, external links, multi-step workflows
+
+### When to Use Task Pages vs Cards
+
+| Use Case | Card | Task Page |
+|----------|------|-----------|
+| Quick flashcard / MCQ | ✓ | |
+| Simple self-assessment | ✓ | |
+| Multi-step exercise | | ✓ |
+| Research with multiple inputs | | ✓ |
+| Needs external links (video, library) | | ✓ |
+| Requires draft saving | | ✓ |
+| >5 minute completion time | | ✓ |
+
+### Creating a Task Page
+
+**1. Design the task page HTML:**
+
+```html
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Übung B: Forschungsartikel analysieren</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+    window.COMMUTE_CONFIG = {
+        deviceToken: '{{device_token}}',
+        taskPageId: '{{task_page_id}}',
+        apiBase: '{{api_base}}'
+    };
+    </script>
+    <script src="/static/js/task-api.js"></script>
+</head>
+<body class="bg-gray-50">
+    <div class="max-w-2xl mx-auto p-4 pb-20">
+        <!-- Header -->
+        <h1 class="text-2xl font-bold mb-4">Task Title</h1>
+
+        <!-- Quick links (external resources) -->
+        <div class="flex gap-3 mb-6">
+            <a href="https://moodle.fernuni-hagen.de" target="_blank"
+               class="flex-1 py-3 bg-red-600 text-white rounded-lg text-center">
+                Video (Moodle)
+            </a>
+            <a href="https://www.fernuni-hagen.de/bibliothek/" target="_blank"
+               class="flex-1 py-3 bg-green-600 text-white rounded-lg text-center">
+                Bibliothek
+            </a>
+        </div>
+
+        <!-- Form inputs -->
+        <div class="bg-white rounded-xl shadow-sm p-5 mb-4">
+            <label class="block text-sm font-medium mb-1">Question</label>
+            <input type="text" id="field1" class="w-full p-3 border rounded-lg">
+        </div>
+
+        <!-- Action buttons -->
+        <div class="flex gap-3 sticky bottom-4">
+            <button onclick="saveDraft()" class="flex-1 py-3 bg-amber-100 text-amber-700 rounded-lg">
+                Entwurf speichern
+            </button>
+            <button onclick="submitAnswers()" class="flex-1 py-3 bg-indigo-600 text-white rounded-lg">
+                Abschliessen
+            </button>
+        </div>
+    </div>
+
+    <script>
+    // Restore draft on load
+    document.addEventListener('DOMContentLoaded', async () => {
+        const status = await TaskAPI.getStatus();
+        if (status.notes) {
+            const saved = JSON.parse(status.notes);
+            // Restore field values...
+        }
+    });
+
+    async function saveDraft() {
+        const data = { field1: document.getElementById('field1').value };
+        await TaskAPI.saveDraft(JSON.stringify(data));
+    }
+
+    async function submitAnswers() {
+        const data = { field1: document.getElementById('field1').value };
+        await TaskAPI.submitResponse(data);
+        await TaskAPI.complete();
+    }
+    </script>
+</body>
+</html>
+```
+
+**2. Insert task page into database:**
+
+```sql
+INSERT INTO task_pages (id, title, description, page_html, course_id, topics, tags, estimated_duration_minutes, difficulty)
+VALUES (
+    'ubung-b-article-analysis',
+    'Übung B: Forschungsartikel analysieren',
+    'Recherchiere einen Zeitschriftenartikel und analysiere die Forschungsfrage.',
+    '<!DOCTYPE html>...', -- Full HTML from step 1
+    (SELECT id FROM courses WHERE slug = 'sociology'),
+    ARRAY['forschungsartikel', 'literaturrecherche'],
+    ARRAY['Week 3-4'],
+    45,
+    'intermediate'
+);
+```
+
+**3. Create task_reference card:**
+
+```sql
+INSERT INTO cards (card_type, task_page_id, course_id, semantic_description, visibility, card_html, response_schema, tags)
+VALUES (
+    'task_reference',
+    'ubung-b-article-analysis',
+    (SELECT id FROM courses WHERE slug = 'sociology'),
+    'Aufgabe: Übung B - Forschungsartikel',
+    'public',
+    '',
+    '{}',
+    ARRAY['Week 3-4']
+);
+```
+
+### TaskAPI Reference
+
+| Method | Description |
+|--------|-------------|
+| `TaskAPI.getStatus()` | Returns `{ status, notes, started_at, completed_at }` |
+| `TaskAPI.saveDraft(notes)` | Save draft as string (use JSON.stringify for objects) |
+| `TaskAPI.submitResponse(data)` | Submit response data object |
+| `TaskAPI.complete()` | Mark task as completed |
+| `TaskAPI.setStatus(status)` | Set status: 'not_started', 'in_progress', 'completed' |
+
+### Task Page Best Practices
+
+1. **Always restore drafts on load** - Check `status.notes` in DOMContentLoaded
+2. **Use sticky action buttons** - Keep save/submit visible at bottom
+3. **Validate before submit** - Check required fields before calling complete()
+4. **Include quick links** - External resources (Moodle, library) should be one tap away
+5. **Use step indicators** - Number sections for multi-step tasks (1, 2, 3...)
+6. **Show feedback** - Display "Entwurf gespeichert!" or "Abgeschlossen!" messages
+
 ---
 
 ## Content Sources
@@ -282,7 +513,8 @@ cards = [
             "type": "object",
             "properties": {...},
             "required": [...]
-        }
+        },
+        "tags": ["Week 3-4"]  # Required: content block tag
     },
     # More cards...
 ]
@@ -291,10 +523,11 @@ with psycopg.connect(DATABASE_URL) as conn:
     with conn.cursor() as cur:
         for card in cards:
             cur.execute(
-                """INSERT INTO cards (semantic_description, course_task_ref, status, card_html, response_schema)
-                   VALUES (%s, %s, 'active', %s, %s)""",
+                """INSERT INTO cards (semantic_description, course_task_ref, status, card_html, response_schema, tags)
+                   VALUES (%s, %s, 'active', %s, %s, %s)""",
                 (card["semantic_description"], card["course_task_ref"],
-                 card["card_html"], json.dumps(card["response_schema"]))
+                 card["card_html"], json.dumps(card["response_schema"]),
+                 card.get("tags", ["Week 1-2"]))  # Default to Week 1-2 if not specified
             )
             print(f"Inserted: {card['semantic_description'][:50]}...")
     conn.commit()
@@ -391,6 +624,9 @@ fly ssh console -C "python /tmp/insert_cards.py"
 6. **Test card HTML before bulk insertion** - Prevents broken cards in production
 7. **Use meaningful `semantic_description`** - Helps with future card management
 8. **Include `course_task_ref`** - Links cards to course structure
+9. **Always include `tags`** - Required for content filtering (e.g., `['Week 3-4']`)
+10. **Use task pages for complex exercises** - Multi-step tasks with >5 min duration
+11. **Create task_reference cards for task pages** - Ensures tasks appear in card feed
 
 ### DON'T:
 
@@ -400,6 +636,8 @@ fly ssh console -C "python /tmp/insert_cards.py"
 4. **Hardcode card IDs** - The app injects them automatically
 5. **Use external CSS/JS** - Everything must use Tailwind and Alpine.js
 6. **Create too many similar cards at once** - Variety improves engagement
+7. **Forget tags** - Cards without tags won't be filterable
+8. **Create task pages without task_reference cards** - Task won't appear in card feed
 
 ### Common Mistakes to Avoid:
 
@@ -410,6 +648,9 @@ fly ssh console -C "python /tmp/insert_cards.py"
 | Broken HTML | Missing Alpine directives | Test in browser first |
 | Wrong language | Copy-pasting from English sources | Write fresh in German |
 | Missing submit button | Incomplete card template | Use full patterns from CARD_CONVENTION.md |
+| Missing tags | Forgetting to add tags array | Always include `tags: ["Week X-Y"]` |
+| Task page not visible | No task_reference card created | Create card with `card_type: 'task_reference'` |
+| Draft not restoring | Not calling getStatus on load | Add DOMContentLoaded handler |
 
 ---
 
@@ -419,6 +660,7 @@ Before inserting any card, verify:
 
 - [ ] `semantic_description` clearly explains the learning goal
 - [ ] `course_task_ref` links to correct course element (if applicable)
+- [ ] `tags` array includes appropriate week block (e.g., `['Week 3-4']`)
 - [ ] Card HTML starts with `<div x-data="cardResponse()">`
 - [ ] Submit button uses `submitResponse({...})`
 - [ ] All user-facing text is in German
@@ -427,13 +669,31 @@ Before inserting any card, verify:
 - [ ] Source links use correct Firebase Storage URLs with `#page=X`
 - [ ] Card renders correctly on mobile viewport (375px)
 
+### Task Page Quality Checklist
+
+Before inserting any task page, verify:
+
+- [ ] `id` is unique and descriptive (e.g., `ubung-b-article-analysis`)
+- [ ] `tags` array includes appropriate week block
+- [ ] HTML includes `COMMUTE_CONFIG` script with placeholders
+- [ ] HTML includes `<script src="/static/js/task-api.js"></script>`
+- [ ] Draft restoration implemented in `DOMContentLoaded`
+- [ ] Required fields validated before `complete()` call
+- [ ] Sticky action buttons at bottom for save/submit
+- [ ] External links open in `target="_blank"`
+- [ ] Corresponding `task_reference` card created
+
 ---
 
 ## File References
 
 - **Technical HTML patterns:** `/CARD_CONVENTION.md`
 - **This workflow guide:** `/docs/CARD-CREATION-GUIDE.md`
+- **Task pages architecture:** `/docs/TASK-PAGES-ARCHITECTURE.md`
 - **Authentication concept:** `/docs/AUTHENTICATION-CONCEPT.md`
+- **Task API library:** `/static/js/task-api.js`
 - **PDF manifest:** `/materials/manifest.json`
 - **Exercise files:** `/exercises/`
 - **Study schedule:** `/study_schedule/`
+- **Week 3-4 content script:** `/scripts/insert_week_3_4_content.py`
+- **Übung B task page SQL:** `/scripts/ubung_b_task_page_full.sql`

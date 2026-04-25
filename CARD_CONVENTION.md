@@ -2,12 +2,60 @@
 
 This document defines the contract for generating card HTML snippets. Claude Code MUST follow this convention when generating new cards for the sociology learning PWA.
 
+**Related Documentation:**
+- [CARD-CREATION-GUIDE.md](docs/CARD-CREATION-GUIDE.md) - Workflow and methodology
+- [TASK-PAGES-ARCHITECTURE.md](docs/TASK-PAGES-ARCHITECTURE.md) - Task pages system
+
 ## Overview
 
 Each card in the database contains a self-contained HTML snippet that:
 1. Renders its own UI using Tailwind CSS
 2. Manages its own interactivity using Alpine.js
 3. Submits responses through a standardized mechanism
+
+## Database Schema
+
+### Cards Table
+
+```sql
+CREATE TABLE cards (
+    id SERIAL PRIMARY KEY,
+    card_type VARCHAR(50) DEFAULT 'simple',     -- 'simple' | 'task_reference'
+    card_html TEXT NOT NULL,
+    response_schema JSONB,
+    semantic_description TEXT,
+    course_task_ref VARCHAR(255),
+    course_id INTEGER REFERENCES courses(id),
+    visibility VARCHAR(20) DEFAULT 'public',
+    status VARCHAR(20) DEFAULT 'active',
+
+    -- Tags for filtering (e.g., week blocks)
+    tags TEXT[],                                -- e.g., ['Week 1-2'], ['Week 3-4']
+
+    -- Task page reference (for task_reference cards)
+    task_page_id VARCHAR(64) REFERENCES task_pages(id),
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Index for efficient tag filtering
+CREATE INDEX idx_cards_tags ON cards USING GIN(tags);
+```
+
+### Tags Convention
+
+Tags are used to organize cards into content blocks for filtering:
+
+| Tag | Content Block |
+|-----|---------------|
+| `Week 1-2` | First 2-week block (initial content) |
+| `Week 3-4` | Second block |
+| `Week 5-6` | Third block |
+| `Week 7-8` | Fourth block |
+| etc. | Continues as needed |
+
+**Important:** When creating new cards, always include the appropriate `tags` array.
 
 ## Required Structure
 
@@ -279,6 +327,45 @@ Response schema:
 { "type": "object", "properties": { "order": { "type": "array", "items": { "type": "string" } } }, "required": ["order"] }
 ```
 
+### 6. Task Reference Card
+
+For linking to a task page (interactive exercises rendered in iframe). These cards display task status and provide navigation to the full task page.
+
+```html
+<div x-data="cardResponse()" class="p-4">
+    <div class="flex items-start gap-3">
+        <div class="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center flex-shrink-0">
+            <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/>
+            </svg>
+        </div>
+        <div class="flex-1">
+            <h3 class="font-semibold text-gray-800">[Task Title]</h3>
+            <p class="text-sm text-gray-600 mt-1">[Task Description]</p>
+            <div class="flex items-center gap-2 mt-2">
+                <span class="text-xs px-2 py-1 bg-amber-100 text-amber-700 rounded">~30 Min</span>
+                <span class="text-xs text-gray-500">Übung</span>
+            </div>
+        </div>
+    </div>
+
+    <button @click="submitResponse({ action: 'open_task' })"
+            class="mt-4 w-full py-3 bg-indigo-600 text-white rounded-lg font-medium">
+        Aufgabe öffnen
+    </button>
+</div>
+```
+
+**Note:** Task reference cards require:
+- `card_type = 'task_reference'`
+- `task_page_id` set to the task page ID
+- The PWA handles navigation to the task page when the response is submitted
+
+Response schema:
+```json
+{ "type": "object", "properties": { "action": { "type": "string" } }, "required": ["action"] }
+```
+
 ## Styling Guidelines
 
 1. **Use Tailwind utility classes only** - no custom CSS
@@ -316,19 +403,117 @@ To test a card before inserting into the database:
 2. The harness provides a mock `cardResponse()` that logs to console
 3. Verify all interactions work before generating the INSERT statement
 
-## Database INSERT Template
+## Database INSERT Templates
 
-When generating a new card:
+### Standard Learning Card
 
 ```sql
-INSERT INTO cards (semantic_description, course_task_ref, status, card_html, response_schema)
+INSERT INTO cards (
+    card_type, semantic_description, course_task_ref, course_id,
+    status, card_html, response_schema, tags
+)
 VALUES (
+    'simple',
     'Learning goal description for Claude Code reasoning',
-    'Optional: course-task-id-123',
+    'Optional: Übung A - Task 3',
+    (SELECT id FROM courses WHERE slug = 'sociology'),
     'active',
     E'<div x-data="cardResponse()" class="p-4">...</div>',
-    '{"type": "object", "properties": {...}, "required": [...]}'::jsonb
+    '{"type": "object", "properties": {...}, "required": [...]}'::jsonb,
+    ARRAY['Week 1-2']  -- Tag for content filtering
 );
 ```
 
-Note: Use `E'...'` syntax for the card_html to handle any escaped characters properly.
+### Task Reference Card (links to task page)
+
+```sql
+-- First, create the task page
+INSERT INTO task_pages (id, title, description, page_html, course_id, topics, tags, estimated_duration_minutes, difficulty)
+VALUES (
+    'ubung-b-article-analysis',
+    'Übung B: Forschungsartikel analysieren',
+    'Recherchiere und analysiere einen wissenschaftlichen Artikel.',
+    '<!DOCTYPE html>...',  -- Full HTML document
+    (SELECT id FROM courses WHERE slug = 'sociology'),
+    ARRAY['forschungsartikel', 'literaturrecherche'],
+    ARRAY['Week 3-4'],
+    45,
+    'intermediate'
+);
+
+-- Then, create a task_reference card pointing to it
+INSERT INTO cards (
+    card_type, task_page_id, course_id, semantic_description,
+    visibility, card_html, response_schema, tags
+)
+VALUES (
+    'task_reference',
+    'ubung-b-article-analysis',
+    (SELECT id FROM courses WHERE slug = 'sociology'),
+    'Aufgabe: Übung B - Forschungsartikel',
+    'public',
+    '',  -- Card HTML can be empty; PWA generates display from task page metadata
+    '{}',
+    ARRAY['Week 3-4']
+);
+```
+
+### Notes
+
+- Use `E'...'` syntax for card_html to handle escaped characters
+- Always include `tags` array for content filtering
+- Task reference cards can have empty `card_html`; the PWA displays task page info
+- Use consistent tag naming: `Week 1-2`, `Week 3-4`, etc.
+
+---
+
+## Task Pages
+
+For complex, interactive learning experiences, use task pages instead of inline cards. Task pages are rendered in an iframe and have their own API for saving drafts and submitting responses.
+
+See [TASK-PAGES-ARCHITECTURE.md](docs/TASK-PAGES-ARCHITECTURE.md) for full documentation.
+
+### Task Page HTML Template
+
+```html
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Task Title</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+    window.COMMUTE_CONFIG = {
+        deviceToken: '{{device_token}}',
+        taskPageId: '{{task_page_id}}',
+        apiBase: '{{api_base}}'
+    };
+    </script>
+    <script src="/static/js/task-api.js"></script>
+</head>
+<body class="bg-gray-50">
+    <div class="max-w-2xl mx-auto p-4 pb-20">
+        <!-- Task content here -->
+    </div>
+
+    <script>
+    // Use TaskAPI for interactions:
+    // - TaskAPI.saveDraft(notes) - Save draft/notes
+    // - TaskAPI.submitResponse(data) - Submit response data
+    // - TaskAPI.complete() - Mark task as completed
+    // - TaskAPI.getStatus() - Get current status (includes saved notes)
+    </script>
+</body>
+</html>
+```
+
+### TaskAPI Methods
+
+| Method | Description |
+|--------|-------------|
+| `TaskAPI.getStatus()` | Get current status and saved notes |
+| `TaskAPI.saveDraft(notes)` | Save draft notes (string) |
+| `TaskAPI.submitResponse(data)` | Submit response data (object) |
+| `TaskAPI.complete()` | Mark task as completed |
+| `TaskAPI.setStatus(status)` | Set status: 'not_started', 'in_progress', 'completed' |
