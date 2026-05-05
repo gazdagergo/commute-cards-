@@ -594,9 +594,33 @@ def api_cards():
                     "tags": row[13] or []
                 })
 
+            # Get total card count (without tag filter) for stats display
+            total_count = len(cards)
+            if tags_param:
+                # Query total without tag filter to show "filtered/total"
+                total_query = """
+                    SELECT COUNT(*) FROM cards c
+                    LEFT JOIN courses co ON c.course_id = co.id
+                    WHERE (c.visibility = 'public'"""
+                total_params = []
+                if device_token:
+                    total_query += " OR c.device_token = %s"
+                    total_params.append(device_token)
+                total_query += ")"
+                if courses_param:
+                    course_slugs = [s.strip() for s in courses_param.split(",") if s.strip()]
+                    if course_slugs:
+                        placeholders = ",".join(["%s"] * len(course_slugs))
+                        total_query += f" AND co.slug IN ({placeholders})"
+                        total_params.extend(course_slugs)
+                cur.execute(total_query, total_params)
+                total_count = cur.fetchone()[0]
+
             return jsonify({
                 "cards": cards,
-                "count": len(cards)
+                "count": len(cards),
+                "total_count": total_count,
+                "is_filtered": bool(tags_param)
             })
 
 

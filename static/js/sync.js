@@ -18,7 +18,8 @@ import {
     getCardCount,
     getPendingCount,
     getSubscribedCourses,
-    getSubscribedTags
+    getSubscribedTags,
+    setConfig
 } from './db.js';
 
 const API_BASE = '';  // Same origin
@@ -102,6 +103,13 @@ export async function fetchInitialCards() {
             await saveCards(cards);
             console.log(`Cached ${cards.length} cards from courses: ${subscribedCourses.join(', ')}, tags: ${subscribedTags.length > 0 ? subscribedTags.join(', ') : 'all'}`);
         }
+
+        // Store card counts for stats display (filtered vs total)
+        await setConfig('card_counts', {
+            filtered: data.count || cards.length,
+            total: data.total_count || cards.length,
+            is_filtered: data.is_filtered || false
+        });
 
         return { success: true, count: cards.length };
     } catch (error) {

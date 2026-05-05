@@ -80,7 +80,7 @@
                         <span x-text="stats.completed_today"></span> heute
                     </span>
                     <span x-show="stats" x-cloak class="text-indigo-200">
-                        <span x-text="stats.remaining"></span> offen
+                        <span x-text="stats.remaining"></span><span x-show="stats.is_filtered">/<span x-text="stats.total_cards_unfiltered"></span></span> offen
                     </span>
 
                     <!-- Settings button -->

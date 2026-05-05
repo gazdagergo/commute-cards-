@@ -565,14 +565,23 @@ export async function getStats() {
         }
     }
 
+    // Get card counts from last sync (for filtered/total display)
+    const cardCounts = await getConfig('card_counts');
+    const isFiltered = cardCounts?.is_filtered || false;
+    const totalCardsUnfiltered = cardCounts?.total || cards.length;
+
+    const remaining = newCards + skipped + (await getDueCardIds()).length;
+
     return {
         total_cards: cards.length,
+        total_cards_unfiltered: totalCardsUnfiltered,
+        is_filtered: isFiltered,
         completed_today: completedToday,
         total_completed: totalCompleted,
         scheduled: scheduled,
         new_cards: newCards,
         skipped: skipped,
-        remaining: newCards + skipped + (await getDueCardIds()).length
+        remaining: remaining
     };
 }
 
