@@ -14,13 +14,14 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <!-- Local-first modules - load and register before Alpine starts -->
     <script type="module">
-        import { cardResponse, learningApp, taskPageView, taskPagesList } from '/static/js/app.js';
+        import { cardResponse, learningApp, taskPageView, taskPagesList, feedApp } from '/static/js/app.js';
 
         // Register components globally for Alpine
         window.cardResponse = cardResponse;
         window.learningApp = learningApp;
         window.taskPageView = taskPageView;
         window.taskPagesList = taskPagesList;
+        window.feedApp = feedApp;
 
         // Now dynamically load and start Alpine
         const script = document.createElement('script');
@@ -490,6 +491,182 @@
         </div>
     </div>
 
+    <!-- Feed Section -->
+    <div id="feed-app" x-data="feedApp()" x-init="init()" x-cloak class="hidden max-w-lg mx-auto">
+        <header class="bg-indigo-600 text-white px-4 py-3 sticky top-0 z-10">
+            <div class="flex items-center justify-between">
+                <h1 class="font-semibold">Feed</h1>
+                <button @click="loadFeed()" class="p-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-400">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="p-4 pb-20">
+            <!-- Display name prompt (if not set) -->
+            <div x-show="!displayName" class="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-4">
+                <p class="text-amber-800 text-sm mb-2">Gib deinen Namen ein, um an Diskussionen teilzunehmen:</p>
+                <div class="flex gap-2">
+                    <input type="text" x-model="displayName" @blur="saveDisplayName()"
+                           class="flex-1 px-3 py-2 border border-amber-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+                           placeholder="Dein Name...">
+                    <button @click="saveDisplayName()" class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm">
+                        OK
+                    </button>
+                </div>
+            </div>
+
+            <!-- Loading -->
+            <div x-show="loading" class="flex items-center justify-center py-20">
+                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+            </div>
+
+            <!-- Error -->
+            <div x-show="!loading && error" x-cloak class="text-center py-10">
+                <p class="text-red-600 mb-4" x-text="error"></p>
+                <button @click="loadFeed()" class="px-4 py-2 bg-indigo-600 text-white rounded-lg">
+                    Erneut versuchen
+                </button>
+            </div>
+
+            <!-- Empty state -->
+            <div x-show="!loading && !error && feedItems.length === 0" x-cloak class="text-center py-20">
+                <div class="text-6xl mb-4">📰</div>
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Noch keine Beitrage</h2>
+                <p class="text-gray-600">Hier werden bald aktuelle Inhalte erscheinen.</p>
+            </div>
+
+            <!-- Feed items -->
+            <div x-show="!loading && !error && feedItems.length > 0" class="space-y-4">
+                <template x-for="item in feedItems" :key="item.id">
+                    <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+                        <!-- Author and date -->
+                        <div class="px-4 pt-4 flex items-center justify-between">
+                            <div class="flex items-center gap-2">
+                                <div class="w-8 h-8 bg-indigo-100 rounded-full flex items-center justify-center">
+                                    <span class="text-indigo-600 font-medium text-sm"
+                                          x-text="(item.author_display_name || 'Anon')[0].toUpperCase()"></span>
+                                </div>
+                                <div>
+                                    <p class="text-sm font-medium text-gray-800"
+                                       x-text="item.author_display_name || 'Anonym'"></p>
+                                    <p class="text-xs text-gray-500" x-text="formatDate(item.created_at)"></p>
+                                </div>
+                            </div>
+                            <!-- Hide menu -->
+                            <div class="relative" x-data="{ menuOpen: false }">
+                                <button @click="menuOpen = !menuOpen" class="p-1 text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                              d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+                                    </svg>
+                                </button>
+                                <div x-show="menuOpen" @click.outside="menuOpen = false"
+                                     class="absolute right-0 mt-1 w-48 bg-white rounded-lg shadow-lg border py-1 z-10">
+                                    <button @click="hideItem(item, 'show_later', 7); menuOpen = false"
+                                            class="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50">
+                                        In 7 Tagen zeigen
+                                    </button>
+                                    <button @click="hideItem(item, 'hide'); menuOpen = false"
+                                            class="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50">
+                                        Nie wieder zeigen
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Content -->
+                        <div class="px-4 py-3" x-html="item.content_html"></div>
+
+                        <!-- Reactions bar -->
+                        <div class="px-4 py-2 border-t flex items-center gap-4">
+                            <!-- Like button -->
+                            <button @click="toggleLike(item)"
+                                    class="flex items-center gap-1 text-sm transition-colors"
+                                    :class="item.user_liked ? 'text-red-500' : 'text-gray-500 hover:text-red-500'">
+                                <svg class="w-5 h-5" :fill="item.user_liked ? 'currentColor' : 'none'"
+                                     stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                          d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                                </svg>
+                                <span x-text="item.like_count || ''"></span>
+                            </button>
+
+                            <!-- Comment button -->
+                            <button @click="openCommentForm(item.id)"
+                                    class="flex items-center gap-1 text-sm text-gray-500 hover:text-indigo-600 transition-colors">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                          d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                                </svg>
+                                <span x-text="item.comment_count || ''"></span>
+                            </button>
+                        </div>
+
+                        <!-- Comments section -->
+                        <div x-show="getComments(item).length > 0 || activeCommentItemId === item.id"
+                             class="px-4 pb-3 border-t bg-gray-50">
+                            <!-- Existing comments -->
+                            <template x-for="comment in getComments(item)" :key="comment.id">
+                                <div class="py-2 border-b border-gray-100 last:border-0">
+                                    <div class="flex items-start gap-2">
+                                        <div class="w-6 h-6 bg-gray-200 rounded-full flex-shrink-0 flex items-center justify-center">
+                                            <span class="text-gray-600 text-xs font-medium"
+                                                  x-text="(comment.display_name || 'A')[0].toUpperCase()"></span>
+                                        </div>
+                                        <div class="flex-1 min-w-0">
+                                            <p class="text-xs">
+                                                <span class="font-medium text-gray-800"
+                                                      x-text="comment.display_name || 'Anonym'"></span>
+                                                <span class="text-gray-400 ml-1" x-text="formatDate(comment.created_at)"></span>
+                                            </p>
+                                            <p class="text-sm text-gray-700" x-text="comment.reaction_content?.text"></p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </template>
+
+                            <!-- New comment form -->
+                            <div x-show="activeCommentItemId === item.id" class="pt-3">
+                                <div class="flex gap-2">
+                                    <input type="text" x-model="newComment"
+                                           @keydown.enter="submitComment(item)"
+                                           class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+                                           placeholder="Kommentar schreiben...">
+                                    <button @click="submitComment(item)"
+                                            :disabled="!newComment.trim() || submittingComment"
+                                            class="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm disabled:opacity-50">
+                                        <span x-show="!submittingComment">Senden</span>
+                                        <span x-show="submittingComment">...</span>
+                                    </button>
+                                    <button @click="closeCommentForm()"
+                                            class="px-2 py-2 text-gray-500 hover:text-gray-700">
+                                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Load more button -->
+                <div x-show="hasMore" class="text-center py-4">
+                    <button @click="loadMore()"
+                            :disabled="loadingMore"
+                            class="px-6 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200 disabled:opacity-50">
+                        <span x-show="!loadingMore">Mehr laden</span>
+                        <span x-show="loadingMore">Laden...</span>
+                    </button>
+                </div>
+            </div>
+        </main>
+    </div>
+
     <!-- Task Pages Section (separate from learningApp) -->
     <div id="task-pages-app" x-data="{ currentView: 'list', selectedTaskPageId: null }" x-cloak class="hidden max-w-lg mx-auto">
         <!-- Task Pages List View -->
@@ -623,7 +800,7 @@
     <nav class="fixed bottom-0 left-0 right-0 bg-white border-t safe-bottom z-40 max-w-lg mx-auto"
          x-data="{ activeTab: 'cards' }">
         <div class="flex">
-            <button @click="activeTab = 'cards'; document.getElementById('task-pages-app').classList.add('hidden'); document.querySelector('[x-data*=learningApp]').classList.remove('hidden')"
+            <button @click="activeTab = 'cards'; document.getElementById('feed-app').classList.add('hidden'); document.getElementById('task-pages-app').classList.add('hidden'); document.querySelector('[x-data*=learningApp]').classList.remove('hidden')"
                     class="flex-1 py-3 flex flex-col items-center gap-1 transition-colors"
                     :class="activeTab === 'cards' ? 'text-indigo-600' : 'text-gray-400'">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -632,7 +809,16 @@
                 </svg>
                 <span class="text-xs font-medium">Karten</span>
             </button>
-            <button @click="activeTab = 'tasks'; document.querySelector('[x-data*=learningApp]').classList.add('hidden'); document.getElementById('task-pages-app').classList.remove('hidden')"
+            <button @click="activeTab = 'feed'; document.querySelector('[x-data*=learningApp]').classList.add('hidden'); document.getElementById('task-pages-app').classList.add('hidden'); document.getElementById('feed-app').classList.remove('hidden')"
+                    class="flex-1 py-3 flex flex-col items-center gap-1 transition-colors"
+                    :class="activeTab === 'feed' ? 'text-indigo-600' : 'text-gray-400'">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
+                </svg>
+                <span class="text-xs font-medium">Feed</span>
+            </button>
+            <button @click="activeTab = 'tasks'; document.querySelector('[x-data*=learningApp]').classList.add('hidden'); document.getElementById('feed-app').classList.add('hidden'); document.getElementById('task-pages-app').classList.remove('hidden')"
                     class="flex-1 py-3 flex flex-col items-center gap-1 transition-colors"
                     :class="activeTab === 'tasks' ? 'text-indigo-600' : 'text-gray-400'">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -385,6 +385,72 @@ def init_db():
 
             print("Tags setup done", file=sys.stderr)
 
+            # ==========================================================
+            # FEED TABLES - Newsfeed feature
+            # ==========================================================
+            print("Creating feed tables...", file=sys.stderr)
+
+            # Drop and recreate feed tables to ensure clean schema
+            # (Safe since this is a new feature with no production data yet)
+            cur.execute("DROP TABLE IF EXISTS feed_item_user_state CASCADE")
+            cur.execute("DROP TABLE IF EXISTS feed_reactions CASCADE")
+            cur.execute("DROP TABLE IF EXISTS feed_items CASCADE")
+
+            # Feed items table - shared content in the newsfeed
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS feed_items (
+                    id SERIAL PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    author_device_token VARCHAR(64),
+                    author_display_name VARCHAR(100),
+                    item_type VARCHAR(50) DEFAULT 'post',
+                    content_html TEXT NOT NULL,
+                    reaction_schema JSONB DEFAULT '{}',
+                    course_id INTEGER REFERENCES courses(id),
+                    tags TEXT[],
+                    metadata JSONB DEFAULT '{}'
+                )
+            """)
+
+            # Feed reactions table - likes, comments, votes, etc.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS feed_reactions (
+                    id SERIAL PRIMARY KEY,
+                    feed_item_id INTEGER REFERENCES feed_items(id) ON DELETE CASCADE,
+                    device_token VARCHAR(64) NOT NULL,
+                    display_name VARCHAR(100),
+                    reaction_type VARCHAR(50) NOT NULL,
+                    reaction_content JSONB NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Feed item user state - per-user visibility controls
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS feed_item_user_state (
+                    id SERIAL PRIMARY KEY,
+                    feed_item_id INTEGER REFERENCES feed_items(id) ON DELETE CASCADE,
+                    device_token VARCHAR(64) NOT NULL,
+                    hidden BOOLEAN DEFAULT FALSE,
+                    show_after DATE,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(feed_item_id, device_token)
+                )
+            """)
+
+            # Indexes for feed tables
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_feed_items_created_at ON feed_items(created_at DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_feed_reactions_item ON feed_reactions(feed_item_id)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_feed_user_state_device ON feed_item_user_state(device_token)
+            """)
+
+            print("Feed tables created", file=sys.stderr)
+
             print("Migrations done, creating indexes...", file=sys.stderr)
 
             # ==========================================================
@@ -1512,6 +1578,370 @@ def admin_seed_task_pages():
 
             conn.commit()
             return jsonify({"success": True, "message": "Task pages and task_reference card seeded"})
+
+
+# ==========================================================
+# FEED API - Newsfeed feature
+# ==========================================================
+
+@app.route("/api/feed")
+def api_feed():
+    """Get feed items with reactions.
+
+    Query params:
+    - device_token: Required for personalized feed (hidden items, etc.)
+    - limit: Number of items to return (default 20, max 50)
+    - offset: Pagination offset
+    - course: Filter by course slug
+    """
+    device_token = request.args.get("device_token") or request.headers.get("X-Device-Token")
+    limit = min(int(request.args.get("limit", 20)), 50)
+    offset = int(request.args.get("offset", 0))
+    course_slug = request.args.get("course")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Build query
+            query = """
+                SELECT fi.id, fi.created_at, fi.author_device_token, fi.author_display_name,
+                       fi.item_type, fi.content_html, fi.reaction_schema, fi.tags, fi.metadata,
+                       c.slug as course_slug
+                FROM feed_items fi
+                LEFT JOIN courses c ON fi.course_id = c.id
+                WHERE 1=1
+            """
+            params = []
+
+            # Exclude hidden items for this device
+            if device_token:
+                query += """
+                    AND NOT EXISTS (
+                        SELECT 1 FROM feed_item_user_state fius
+                        WHERE fius.feed_item_id = fi.id
+                          AND fius.device_token = %s
+                          AND (fius.hidden = TRUE OR fius.show_after > CURRENT_DATE)
+                    )
+                """
+                params.append(device_token)
+
+            if course_slug:
+                query += " AND c.slug = %s"
+                params.append(course_slug)
+
+            query += " ORDER BY fi.created_at DESC LIMIT %s OFFSET %s"
+            params.extend([limit, offset])
+
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+            feed_items = []
+            for row in rows:
+                item_id = row[0]
+
+                # Get reactions for this item
+                cur.execute("""
+                    SELECT id, device_token, display_name, reaction_type, reaction_content, created_at
+                    FROM feed_reactions
+                    WHERE feed_item_id = %s
+                    ORDER BY created_at ASC
+                """, (item_id,))
+                reaction_rows = cur.fetchall()
+
+                reactions = []
+                like_count = 0
+                user_liked = False
+
+                for r in reaction_rows:
+                    reaction = {
+                        "id": r[0],
+                        "device_token": r[1],
+                        "display_name": r[2],
+                        "reaction_type": r[3],
+                        "reaction_content": r[4],
+                        "created_at": r[5].isoformat() if r[5] else None
+                    }
+                    reactions.append(reaction)
+
+                    if r[3] == "like":
+                        like_count += 1
+                        if device_token and r[1] == device_token:
+                            user_liked = True
+
+                feed_items.append({
+                    "id": item_id,
+                    "created_at": row[1].isoformat() if row[1] else None,
+                    "author_device_token": row[2],
+                    "author_display_name": row[3],
+                    "item_type": row[4],
+                    "content_html": row[5],
+                    "reaction_schema": row[6],
+                    "tags": row[7] or [],
+                    "metadata": row[8] or {},
+                    "course_slug": row[9],
+                    "reactions": reactions,
+                    "like_count": like_count,
+                    "user_liked": user_liked,
+                    "comment_count": sum(1 for r in reactions if r["reaction_type"] == "comment")
+                })
+
+            return jsonify({
+                "feed_items": feed_items,
+                "count": len(feed_items),
+                "offset": offset,
+                "limit": limit
+            })
+
+
+@app.route("/api/feed/items", methods=["POST"])
+def api_feed_create_item():
+    """Create a new feed item."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    content_html = data.get("content_html")
+    if not content_html:
+        return jsonify({"error": "content_html is required"}), 400
+
+    device_token = data.get("device_token") or request.headers.get("X-Device-Token")
+    display_name = data.get("display_name")
+    item_type = data.get("item_type", "post")
+    reaction_schema = data.get("reaction_schema", {})
+    course_slug = data.get("course_slug")
+    tags = data.get("tags", [])
+    metadata = data.get("metadata", {})
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Get course_id if slug provided
+            course_id = None
+            if course_slug:
+                cur.execute("SELECT id FROM courses WHERE slug = %s", (course_slug,))
+                result = cur.fetchone()
+                if result:
+                    course_id = result[0]
+
+            cur.execute("""
+                INSERT INTO feed_items
+                (author_device_token, author_display_name, item_type, content_html, reaction_schema, course_id, tags, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, created_at
+            """, (
+                device_token, display_name, item_type, content_html,
+                json.dumps(reaction_schema), course_id, tags, json.dumps(metadata)
+            ))
+            row = cur.fetchone()
+            conn.commit()
+
+            return jsonify({
+                "success": True,
+                "feed_item": {
+                    "id": row[0],
+                    "created_at": row[1].isoformat() if row[1] else None
+                }
+            })
+
+
+@app.route("/api/feed/items/<int:item_id>")
+def api_feed_get_item(item_id):
+    """Get a single feed item with reactions."""
+    device_token = request.args.get("device_token") or request.headers.get("X-Device-Token")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT fi.id, fi.created_at, fi.author_device_token, fi.author_display_name,
+                       fi.item_type, fi.content_html, fi.reaction_schema, fi.tags, fi.metadata,
+                       c.slug as course_slug
+                FROM feed_items fi
+                LEFT JOIN courses c ON fi.course_id = c.id
+                WHERE fi.id = %s
+            """, (item_id,))
+            row = cur.fetchone()
+
+            if not row:
+                return jsonify({"error": "Feed item not found"}), 404
+
+            # Get reactions
+            cur.execute("""
+                SELECT id, device_token, display_name, reaction_type, reaction_content, created_at
+                FROM feed_reactions
+                WHERE feed_item_id = %s
+                ORDER BY created_at ASC
+            """, (item_id,))
+            reaction_rows = cur.fetchall()
+
+            reactions = []
+            like_count = 0
+            user_liked = False
+
+            for r in reaction_rows:
+                reaction = {
+                    "id": r[0],
+                    "device_token": r[1],
+                    "display_name": r[2],
+                    "reaction_type": r[3],
+                    "reaction_content": r[4],
+                    "created_at": r[5].isoformat() if r[5] else None
+                }
+                reactions.append(reaction)
+
+                if r[3] == "like":
+                    like_count += 1
+                    if device_token and r[1] == device_token:
+                        user_liked = True
+
+            return jsonify({
+                "feed_item": {
+                    "id": row[0],
+                    "created_at": row[1].isoformat() if row[1] else None,
+                    "author_device_token": row[2],
+                    "author_display_name": row[3],
+                    "item_type": row[4],
+                    "content_html": row[5],
+                    "reaction_schema": row[6],
+                    "tags": row[7] or [],
+                    "metadata": row[8] or {},
+                    "course_slug": row[9],
+                    "reactions": reactions,
+                    "like_count": like_count,
+                    "user_liked": user_liked,
+                    "comment_count": sum(1 for r in reactions if r["reaction_type"] == "comment")
+                }
+            })
+
+
+@app.route("/api/feed/items/<int:item_id>/react", methods=["POST"])
+def api_feed_react(item_id):
+    """Add a reaction to a feed item (like, comment, etc.)."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    device_token = data.get("device_token") or request.headers.get("X-Device-Token")
+    if not device_token:
+        return jsonify({"error": "device_token is required"}), 400
+
+    reaction_type = data.get("reaction_type")
+    if not reaction_type:
+        return jsonify({"error": "reaction_type is required"}), 400
+
+    reaction_content = data.get("reaction_content", {})
+    display_name = data.get("display_name")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify item exists
+            cur.execute("SELECT id FROM feed_items WHERE id = %s", (item_id,))
+            if not cur.fetchone():
+                return jsonify({"error": "Feed item not found"}), 404
+
+            # For likes, toggle behavior - remove if exists, add if not
+            if reaction_type == "like":
+                cur.execute("""
+                    SELECT id FROM feed_reactions
+                    WHERE feed_item_id = %s AND device_token = %s AND reaction_type = 'like'
+                """, (item_id, device_token))
+                existing = cur.fetchone()
+
+                if existing:
+                    # Unlike
+                    cur.execute("DELETE FROM feed_reactions WHERE id = %s", (existing[0],))
+                    conn.commit()
+                    return jsonify({"success": True, "action": "unliked"})
+
+            # Add reaction
+            cur.execute("""
+                INSERT INTO feed_reactions
+                (feed_item_id, device_token, display_name, reaction_type, reaction_content)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id, created_at
+            """, (item_id, device_token, display_name, reaction_type, json.dumps(reaction_content)))
+            row = cur.fetchone()
+            conn.commit()
+
+            return jsonify({
+                "success": True,
+                "action": "added",
+                "reaction": {
+                    "id": row[0],
+                    "created_at": row[1].isoformat() if row[1] else None
+                }
+            })
+
+
+@app.route("/api/feed/items/<int:item_id>/react/<int:reaction_id>", methods=["DELETE"])
+def api_feed_delete_reaction(item_id, reaction_id):
+    """Delete a reaction (only owner can delete)."""
+    device_token = request.args.get("device_token") or request.headers.get("X-Device-Token")
+    if not device_token:
+        return jsonify({"error": "device_token is required"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Only allow deleting own reactions
+            cur.execute("""
+                DELETE FROM feed_reactions
+                WHERE id = %s AND feed_item_id = %s AND device_token = %s
+            """, (reaction_id, item_id, device_token))
+
+            if cur.rowcount == 0:
+                return jsonify({"error": "Reaction not found or not owned by you"}), 404
+
+            conn.commit()
+            return jsonify({"success": True})
+
+
+@app.route("/api/feed/items/<int:item_id>/visibility", methods=["POST"])
+def api_feed_visibility(item_id):
+    """Set visibility for a feed item (hide, show later)."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    device_token = data.get("device_token") or request.headers.get("X-Device-Token")
+    if not device_token:
+        return jsonify({"error": "device_token is required"}), 400
+
+    action = data.get("action")  # 'hide', 'show_later', 'show'
+    days = data.get("days")  # for show_later
+
+    if action not in ['hide', 'show_later', 'show']:
+        return jsonify({"error": "action must be 'hide', 'show_later', or 'show'"}), 400
+
+    if action == 'show_later' and (not isinstance(days, int) or days < 1):
+        return jsonify({"error": "days must be a positive integer for show_later"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify item exists
+            cur.execute("SELECT id FROM feed_items WHERE id = %s", (item_id,))
+            if not cur.fetchone():
+                return jsonify({"error": "Feed item not found"}), 404
+
+            if action == 'show':
+                # Remove visibility state
+                cur.execute("""
+                    DELETE FROM feed_item_user_state
+                    WHERE feed_item_id = %s AND device_token = %s
+                """, (item_id, device_token))
+            else:
+                # Upsert visibility state
+                hidden = action == 'hide'
+                show_after = None
+                if action == 'show_later':
+                    cur.execute("SELECT CURRENT_DATE + %s", (days,))
+                    show_after = cur.fetchone()[0]
+
+                cur.execute("""
+                    INSERT INTO feed_item_user_state (feed_item_id, device_token, hidden, show_after, updated_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (feed_item_id, device_token)
+                    DO UPDATE SET hidden = EXCLUDED.hidden, show_after = EXCLUDED.show_after, updated_at = NOW()
+                """, (item_id, device_token, hidden, show_after))
+
+            conn.commit()
+            return jsonify({"success": True, "action": action})
 
 
 # ==========================================================

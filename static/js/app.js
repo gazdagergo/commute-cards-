@@ -989,8 +989,216 @@ export function taskPagesList() {
     };
 }
 
+/**
+ * Feed App component for newsfeed feature
+ * Displays shared posts with reactions and comments
+ */
+export function feedApp() {
+    return {
+        feedItems: [],
+        loading: true,
+        error: null,
+        offset: 0,
+        limit: 20,
+        hasMore: true,
+        loadingMore: false,
+
+        // New comment state
+        newComment: '',
+        submittingComment: false,
+        activeCommentItemId: null,
+
+        // Display name
+        displayName: '',
+
+        async init() {
+            // Load display name from localStorage
+            this.displayName = localStorage.getItem('feed_display_name') || '';
+            await this.loadFeed();
+        },
+
+        async loadFeed() {
+            this.loading = true;
+            this.error = null;
+            this.offset = 0;
+
+            try {
+                const deviceToken = await db.getOrCreateDeviceToken();
+                const response = await fetch(`/api/feed?device_token=${deviceToken}&limit=${this.limit}&offset=0`);
+
+                if (!response.ok) {
+                    throw new Error('Failed to load feed');
+                }
+
+                const data = await response.json();
+                this.feedItems = data.feed_items || [];
+                this.hasMore = data.count >= this.limit;
+                this.offset = data.count;
+
+            } catch (e) {
+                console.error('Failed to load feed:', e);
+                this.error = e.message;
+            } finally {
+                this.loading = false;
+            }
+        },
+
+        async loadMore() {
+            if (this.loadingMore || !this.hasMore) return;
+
+            this.loadingMore = true;
+
+            try {
+                const deviceToken = await db.getOrCreateDeviceToken();
+                const response = await fetch(`/api/feed?device_token=${deviceToken}&limit=${this.limit}&offset=${this.offset}`);
+
+                if (!response.ok) {
+                    throw new Error('Failed to load more');
+                }
+
+                const data = await response.json();
+                this.feedItems = [...this.feedItems, ...(data.feed_items || [])];
+                this.hasMore = data.count >= this.limit;
+                this.offset += data.count;
+
+            } catch (e) {
+                console.error('Failed to load more:', e);
+            } finally {
+                this.loadingMore = false;
+            }
+        },
+
+        async toggleLike(item) {
+            const deviceToken = await db.getOrCreateDeviceToken();
+
+            try {
+                const response = await fetch(`/api/feed/items/${item.id}/react`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        device_token: deviceToken,
+                        reaction_type: 'like',
+                        display_name: this.displayName || null
+                    })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    // Update local state
+                    if (data.action === 'unliked') {
+                        item.user_liked = false;
+                        item.like_count = Math.max(0, item.like_count - 1);
+                    } else {
+                        item.user_liked = true;
+                        item.like_count++;
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to toggle like:', e);
+            }
+        },
+
+        openCommentForm(itemId) {
+            this.activeCommentItemId = itemId;
+            this.newComment = '';
+        },
+
+        closeCommentForm() {
+            this.activeCommentItemId = null;
+            this.newComment = '';
+        },
+
+        async submitComment(item) {
+            if (!this.newComment.trim() || this.submittingComment) return;
+
+            this.submittingComment = true;
+            const deviceToken = await db.getOrCreateDeviceToken();
+
+            try {
+                const response = await fetch(`/api/feed/items/${item.id}/react`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        device_token: deviceToken,
+                        reaction_type: 'comment',
+                        reaction_content: { text: this.newComment.trim() },
+                        display_name: this.displayName || null
+                    })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    // Add comment to local state
+                    item.reactions.push({
+                        id: data.reaction.id,
+                        device_token: deviceToken,
+                        display_name: this.displayName || null,
+                        reaction_type: 'comment',
+                        reaction_content: { text: this.newComment.trim() },
+                        created_at: data.reaction.created_at
+                    });
+                    item.comment_count++;
+                    this.closeCommentForm();
+                }
+            } catch (e) {
+                console.error('Failed to submit comment:', e);
+            } finally {
+                this.submittingComment = false;
+            }
+        },
+
+        async hideItem(item, action, days = null) {
+            const deviceToken = await db.getOrCreateDeviceToken();
+
+            try {
+                const body = { device_token: deviceToken, action };
+                if (days) body.days = days;
+
+                const response = await fetch(`/api/feed/items/${item.id}/visibility`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+
+                if (response.ok) {
+                    // Remove from local list
+                    this.feedItems = this.feedItems.filter(i => i.id !== item.id);
+                }
+            } catch (e) {
+                console.error('Failed to hide item:', e);
+            }
+        },
+
+        saveDisplayName() {
+            localStorage.setItem('feed_display_name', this.displayName);
+        },
+
+        formatDate(isoString) {
+            if (!isoString) return '';
+            const date = new Date(isoString);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffMins = Math.floor(diffMs / 60000);
+            const diffHours = Math.floor(diffMs / 3600000);
+            const diffDays = Math.floor(diffMs / 86400000);
+
+            if (diffMins < 1) return 'Gerade eben';
+            if (diffMins < 60) return `vor ${diffMins}m`;
+            if (diffHours < 24) return `vor ${diffHours}h`;
+            if (diffDays < 7) return `vor ${diffDays}d`;
+
+            return date.toLocaleDateString('de-DE');
+        },
+
+        getComments(item) {
+            return (item.reactions || []).filter(r => r.reaction_type === 'comment');
+        }
+    };
+}
+
 // Make components available globally for Alpine
 window.cardResponse = cardResponse;
 window.learningApp = learningApp;
 window.taskPageView = taskPageView;
 window.taskPagesList = taskPagesList;
+window.feedApp = feedApp;
