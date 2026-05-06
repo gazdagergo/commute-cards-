@@ -573,16 +573,178 @@ def api_tags():
             })
 
 
-@app.route("/api/cards")
+def _create_card():
+    """Helper to create a single card from request JSON."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    # Required fields
+    semantic_description = data.get("semantic_description")
+    card_html = data.get("card_html")
+    response_schema = data.get("response_schema")
+
+    if not semantic_description or not card_html or response_schema is None:
+        return jsonify({"error": "Missing required fields: semantic_description, card_html, response_schema"}), 400
+
+    # Optional fields
+    course_task_ref = data.get("course_task_ref")
+    visibility = data.get("visibility", "public")
+    card_type = data.get("card_type", "learning")
+    course_slug = data.get("course_slug")
+    tags = data.get("tags", [])
+    task_page_id = data.get("task_page_id")
+    device_token = data.get("device_token") or request.headers.get("X-Device-Token")
+
+    # Validate visibility
+    if visibility not in ["public", "private", "course"]:
+        return jsonify({"error": "visibility must be 'public', 'private', or 'course'"}), 400
+
+    # Private cards require device_token
+    if visibility == "private" and not device_token:
+        return jsonify({"error": "device_token required for private cards"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Get course_id if course_slug provided
+            course_id = None
+            if course_slug:
+                cur.execute("SELECT id FROM courses WHERE slug = %s", (course_slug,))
+                result = cur.fetchone()
+                if result:
+                    course_id = result[0]
+
+            cur.execute("""
+                INSERT INTO cards
+                (semantic_description, course_task_ref, card_html, response_schema,
+                 visibility, device_token, card_type, course_id, tags, task_page_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, created_at
+            """, (
+                semantic_description, course_task_ref, card_html, json.dumps(response_schema),
+                visibility, device_token if visibility == "private" else None,
+                card_type, course_id, tags or None, task_page_id
+            ))
+            row = cur.fetchone()
+            conn.commit()
+
+            return jsonify({
+                "success": True,
+                "card": {
+                    "id": row[0],
+                    "created_at": row[1].isoformat() if row[1] else None
+                }
+            })
+
+
+@app.route("/api/cards/bulk", methods=["POST"])
+def api_cards_bulk():
+    """Create multiple cards at once.
+
+    Body:
+    - cards: Array of card objects (same fields as single card creation)
+    """
+    data = request.get_json()
+    if not data or "cards" not in data:
+        return jsonify({"error": "Missing 'cards' array"}), 400
+
+    cards_data = data["cards"]
+    if not isinstance(cards_data, list) or len(cards_data) == 0:
+        return jsonify({"error": "'cards' must be a non-empty array"}), 400
+
+    created = []
+    errors = []
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for i, card in enumerate(cards_data):
+                try:
+                    # Required fields
+                    semantic_description = card.get("semantic_description")
+                    card_html = card.get("card_html")
+                    response_schema = card.get("response_schema")
+
+                    if not semantic_description or not card_html or response_schema is None:
+                        errors.append({"index": i, "error": "Missing required fields"})
+                        continue
+
+                    # Optional fields
+                    course_task_ref = card.get("course_task_ref")
+                    visibility = card.get("visibility", "public")
+                    card_type = card.get("card_type", "learning")
+                    course_slug = card.get("course_slug")
+                    tags = card.get("tags", [])
+                    task_page_id = card.get("task_page_id")
+                    device_token = card.get("device_token")
+
+                    # Get course_id
+                    course_id = None
+                    if course_slug:
+                        cur.execute("SELECT id FROM courses WHERE slug = %s", (course_slug,))
+                        result = cur.fetchone()
+                        if result:
+                            course_id = result[0]
+
+                    cur.execute("""
+                        INSERT INTO cards
+                        (semantic_description, course_task_ref, card_html, response_schema,
+                         visibility, device_token, card_type, course_id, tags, task_page_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id, created_at
+                    """, (
+                        semantic_description, course_task_ref, card_html, json.dumps(response_schema),
+                        visibility, device_token if visibility == "private" else None,
+                        card_type, course_id, tags or None, task_page_id
+                    ))
+                    row = cur.fetchone()
+                    created.append({
+                        "index": i,
+                        "id": row[0],
+                        "created_at": row[1].isoformat() if row[1] else None
+                    })
+                except Exception as e:
+                    errors.append({"index": i, "error": str(e)})
+
+            conn.commit()
+
+    return jsonify({
+        "success": len(errors) == 0,
+        "created": created,
+        "errors": errors,
+        "created_count": len(created),
+        "error_count": len(errors)
+    })
+
+
+@app.route("/api/cards", methods=["GET", "POST"])
 def api_cards():
-    """Get cards - public cards and optionally device-specific private cards.
+    """Get or create cards.
+
+    GET: Get cards - public cards and optionally device-specific private cards.
 
     Query params:
     - device_token: Include private cards for this device
     - since: Only cards created after this ISO timestamp
     - courses: Comma-separated course slugs to filter by (e.g., "sociology,ml-basics")
     - tags: Comma-separated tags to filter by (e.g., "Week 1-2,Week 3-4"). Empty = show all
+
+    POST: Create a new card.
+
+    Body:
+    - semantic_description (required): Learning goal description
+    - card_html (required): Alpine.js/Tailwind HTML snippet
+    - response_schema (required): JSON Schema for response validation
+    - course_task_ref: Reference to course/exercise
+    - visibility: 'public' (default), 'private', 'course'
+    - card_type: 'learning' (default), 'task_reference'
+    - course_slug: Course identifier
+    - tags: Array of tags
+    - task_page_id: For task_reference cards
+    - device_token: Required for private cards
     """
+    if request.method == "POST":
+        return _create_card()
+
     device_token = request.args.get("device_token")
     since = request.args.get("since")
     courses_param = request.args.get("courses")
@@ -953,15 +1115,104 @@ def api_sync():
 # TASK PAGES API - Standalone learning content
 # ==========================================================
 
-@app.route("/api/task-pages")
+@app.route("/api/task-pages", methods=["GET", "POST"])
 def api_task_pages():
-    """List task pages with optional filters.
+    """List or create task pages.
 
+    GET: List task pages with optional filters.
     Query params:
     - course: Filter by course slug
     - tags: Comma-separated tags to filter by (e.g., "Week 1-2,Week 3-4"). Empty = show all
     - device_token: Include status for this device (via header or param)
+
+    POST: Create a new task page.
+    Body:
+    - id (required): Unique identifier (e.g., "sociology-kreislauf-01")
+    - title (required): Page title
+    - page_html (required): Complete HTML document
+    - description: Brief description
+    - course_slug: Course identifier
+    - estimated_minutes: Expected completion time
+    - tags: Array of tags
+    - topics: Array of topic strings
+    - difficulty: 'easy', 'medium', 'hard'
     """
+    if request.method == "POST":
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        # Required fields
+        page_id = data.get("id")
+        title = data.get("title")
+        page_html = data.get("page_html")
+
+        if not page_id or not title or not page_html:
+            return jsonify({"error": "Missing required fields: id, title, page_html"}), 400
+
+        # Optional fields
+        description = data.get("description")
+        course_slug = data.get("course_slug")
+        estimated_minutes = data.get("estimated_minutes")
+        tags = data.get("tags", [])
+        topics = data.get("topics", [])
+        difficulty = data.get("difficulty")
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Get course_id if course_slug provided
+                course_id = None
+                if course_slug:
+                    cur.execute("SELECT id FROM courses WHERE slug = %s", (course_slug,))
+                    result = cur.fetchone()
+                    if result:
+                        course_id = result[0]
+
+                # Check if task page already exists
+                cur.execute("SELECT id FROM task_pages WHERE id = %s", (page_id,))
+                existing = cur.fetchone()
+
+                if existing:
+                    # Update existing
+                    cur.execute("""
+                        UPDATE task_pages
+                        SET title = %s, description = %s, page_html = %s,
+                            course_id = %s, estimated_duration_minutes = %s,
+                            tags = %s, topics = %s, difficulty = %s, updated_at = NOW()
+                        WHERE id = %s
+                    """, (
+                        title, description, page_html, course_id, estimated_minutes,
+                        tags or None, topics or None, difficulty, page_id
+                    ))
+                    conn.commit()
+                    return jsonify({
+                        "success": True,
+                        "action": "updated",
+                        "task_page": {"id": page_id}
+                    })
+                else:
+                    # Create new
+                    cur.execute("""
+                        INSERT INTO task_pages
+                        (id, title, description, page_html, course_id, estimated_duration_minutes, tags, topics, difficulty)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING created_at
+                    """, (
+                        page_id, title, description, page_html, course_id, estimated_minutes,
+                        tags or None, topics or None, difficulty
+                    ))
+                    row = cur.fetchone()
+                    conn.commit()
+                    return jsonify({
+                        "success": True,
+                        "action": "created",
+                        "task_page": {
+                            "id": page_id,
+                            "created_at": row[0].isoformat() if row[0] else None
+                        }
+                    })
+
+    # GET request
     course_slug = request.args.get("course")
     tags_param = request.args.get("tags")
     device_token = request.headers.get("X-Device-Token") or request.args.get("device_token")
