@@ -390,12 +390,6 @@ def init_db():
             # ==========================================================
             print("Creating feed tables...", file=sys.stderr)
 
-            # Drop and recreate feed tables to ensure clean schema
-            # (Safe since this is a new feature with no production data yet)
-            cur.execute("DROP TABLE IF EXISTS feed_item_user_state CASCADE")
-            cur.execute("DROP TABLE IF EXISTS feed_reactions CASCADE")
-            cur.execute("DROP TABLE IF EXISTS feed_items CASCADE")
-
             # Feed items table - shared content in the newsfeed
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS feed_items (
