@@ -14,6 +14,7 @@ const DB_NAME = 'sociology-learning';
 const DB_VERSION = 4;
 
 let dbInstance = null;
+let dbPromise = null;
 
 // Session tracking - cards completed this session won't immediately reappear
 // This resets on page refresh
@@ -23,19 +24,48 @@ const sessionCompletedCards = new Set();
  * Open/create the database
  */
 export async function openDB() {
+    // Return existing connection if valid
     if (dbInstance) return dbInstance;
 
-    return new Promise((resolve, reject) => {
+    // Return existing promise if connection is in progress
+    if (dbPromise) return dbPromise;
+
+    dbPromise = new Promise((resolve, reject) => {
         const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-        request.onerror = () => reject(request.error);
+        request.onerror = () => {
+            dbPromise = null;
+            reject(request.error);
+        };
 
         request.onsuccess = () => {
             dbInstance = request.result;
+
+            // Handle version change (another tab upgraded the DB)
+            dbInstance.onversionchange = () => {
+                dbInstance.close();
+                dbInstance = null;
+                dbPromise = null;
+                console.log('Database version changed, connection closed');
+            };
+
+            // Handle unexpected close
+            dbInstance.onclose = () => {
+                dbInstance = null;
+                dbPromise = null;
+            };
+
+            dbPromise = null;
             resolve(dbInstance);
         };
 
+        request.onblocked = () => {
+            console.warn('Database upgrade blocked - close other tabs');
+        };
+
         request.onupgradeneeded = (event) => {
+            // Clear cached instance during upgrade
+            dbInstance = null;
             const db = event.target.result;
 
             // Config store - device settings
@@ -127,6 +157,8 @@ export async function openDB() {
             }
         };
     });
+
+    return dbPromise;
 }
 
 // =============================================================================
