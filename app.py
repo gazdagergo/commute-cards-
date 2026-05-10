@@ -445,6 +445,50 @@ def init_db():
 
             print("Feed tables created", file=sys.stderr)
 
+            # ==========================================================
+            # MEDIA TABLES - Audio/Video with transcripts
+            # ==========================================================
+            print("Creating media tables...", file=sys.stderr)
+
+            # Media items table - metadata for audio/video content
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS media_items (
+                    id VARCHAR(64) PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    title VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    media_type VARCHAR(20) NOT NULL,
+                    media_url TEXT NOT NULL,
+                    duration_seconds INTEGER,
+                    thumbnail_url TEXT,
+                    learning_unit VARCHAR(64),
+                    course_id INTEGER REFERENCES courses(id),
+                    tags TEXT[]
+                )
+            """)
+
+            # Media transcripts table - transcript lines with timestamps
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS media_transcripts (
+                    id SERIAL PRIMARY KEY,
+                    media_id VARCHAR(64) REFERENCES media_items(id) ON DELETE CASCADE,
+                    lines JSONB NOT NULL,
+                    language VARCHAR(10) DEFAULT 'de',
+                    UNIQUE(media_id, language)
+                )
+            """)
+
+            # Indexes for media tables
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_media_items_media_type ON media_items(media_type)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_media_items_learning_unit ON media_items(learning_unit)
+            """)
+
+            print("Media tables created", file=sys.stderr)
+
             print("Migrations done, creating indexes...", file=sys.stderr)
 
             # ==========================================================
@@ -1773,6 +1817,162 @@ function showStatus(message, type) {
 </html>"""
 
 
+@app.route("/api/admin/seed-media", methods=["POST"])
+def admin_seed_media():
+    """Seed initial media items with transcripts (staging only)."""
+    if not is_staging():
+        return jsonify({"error": "Only available in staging"}), 403
+
+    # Dorit Funke audio transcript
+    dorit_funke_transcript = [
+        {"text": "Hallo, liebe Studierende! ", "timestamp": None},
+        {"text": "Ich sitze ja heute mit Frau Professorin Dorit Funke. ", "timestamp": 3.914829},
+        {"text": "Sie hat die Ernsting's-family-Stiftungsprofessur für Mikrosoziologie an der FernUni in Hagen. ", "timestamp": 8.692527},
+        {"text": "Ja, Frau Funke, welches Forschungsfeld bearbeiten Sie da eigentlich genau, und warum?", "timestamp": 13.197417},
+        {"text": "Ja, ich will Ihnen da auch etwas über einen Umweg, denke ich, antworten. ", "timestamp": 19.397032},
+        {"text": "Also, wie Sie schon gesagt haben, bin ich ja von Hause aus Mikrosoziologin, und Mikrosoziologie zu betreiben heißt, ", "timestamp": 28.043878},
+        {"text": "dass ich mich mit den kleinen sozialen Einheiten befasse: ", "timestamp": 31.940341},
+        {"text": "mit Paar- und Familienbeziehungen, mit Verwandtschafts- und Freundschaftsbeziehungen, ", "timestamp": 36.993486},
+        {"text": "mit, ähm, Interaktionen — ", "timestamp": 39.380007},
+        {"text": "im professionellen, in Interaktionszusammenhängen, ", "timestamp": 41.840246},
+        {"text": "zum Beispiel Arzt-Patient-Beziehung, ", "timestamp": 44.33599},
+        {"text": "aber auch therapeutischen Beziehungen, Beziehungen, ", "timestamp": 47.112867},
+        {"text": "die im Feld der Sozialen Arbeit im Zusammenhang mit dem Klienten auftauchen. ", "timestamp": 51.436403},
+        {"text": "Und, ähm, eine Perspektive auf diese verschiedenen sozialen Beziehungen — ", "timestamp": 56.336343},
+        {"text": "jetzt ganz, ganz unterschiedlichen Typs — ist eben die mikrosoziologische Perspektive. ", "timestamp": 60.717411},
+        {"text": "Und wenn man Mikrosoziologie betreibt, heißt das auch immer, ", "timestamp": 65.702289},
+        {"text": "dass eine spezifische Annahme leitend ist, wenn wir unser Handeln betrachten.", "timestamp": 73.754306},
+        {"text": "Soziales Handeln ist eine wichtige, zentrale Kategorie in der Soziologie allgemein. ", "timestamp": 79.398429},
+        {"text": "Und wenn wir Mikrosoziologie betreiben, dann heißt das, dass wir dieses Handeln — ", "timestamp": 83.384912},
+        {"text": "alltägliches Handeln, aber auch außeralltägliches Handeln — unter der Annahme betrachten, ", "timestamp": 89.926072},
+        {"text": "dass in diesem Handeln nichts zufällig ist. ", "timestamp": 93.335993},
+        {"text": "Also, das ist wichtig an dieser Stelle noch mal hervorzuheben: ", "timestamp": 96.515284},
+        {"text": "In unserem Handeln, in unserem sozialen Handeln, in unserem alltäglichen, außeralltäglichen Handeln ist nicht alles bloß zufällig. ", "timestamp": 103.492006},
+        {"text": "Und wenn wir dieses Handeln betrachten, dieses soziale Handeln, dann arbeiten wir natürlich also auch mit gewissen Methoden oder Methodologien.", "timestamp": 112.597204},
+        {"text": "Und wenn wir mit diesen Instrumenten soziales Handeln anschauen, dann sehen wir, ", "timestamp": 118.361881},
+        {"text": "dass hinter diesem Handeln eine Vielzahl von Strukturen auch steckt, die dieses Handeln bestimmen — ", "timestamp": 126.269563},
+        {"text": "also Strukturen, die wir immer schon vorfinden, die Grundlage unseres Handelns sind, ", "timestamp": 132.046331},
+        {"text": "die das Handeln determinieren, könnte man sagen. ", "timestamp": 134.384574},
+        {"text": "Und wir erzeugen aber in diesem sozialen Handeln auch diese Strukturen selbst. ", "timestamp": 140.017705},
+        {"text": "Und eine Kernaufgabe nun in der mikroanalytischen Forschung, in der Mikrosoziologie, ist es, ", "timestamp": 146.677972},
+        {"text": "die Strukturbildung in sozialen Interaktionen zu bestimmen und zu rekonstruieren.", "timestamp": None}
+    ]
+
+    # Circular Cities video transcript (complete)
+    circular_cities_transcript = [
+        {"text": "Mein Name is Annette Elisabeth Töller.", "timestamp": 11.359681},
+        {"text": "Ich bin Professorin für Politikwissenschaft mit dem Schwerpunkt Politikfeldanalyse und Umweltpolitik an der FernUniversität in Hagen.", "timestamp": 13.767515},
+        {"text": "In der Politikfeldanalyse (oder wir nennen das auch Policyforschung) untersuchen wir, welche Eigenschaften politische Maßnahmen haben und warum sie so und eben nicht anders zustande kommen.", "timestamp": 21.528044},
+        {"text": "Dabei unterscheiden wir verschiedene Politikfelder, zum Beispiel die Migrationspolitik, die Sozialpolitik oder auch der Umweltpolitik.", "timestamp": 34.644655},
+        {"text": "Und ich arbeite seit vielen Jahren nicht nur, aber doch schwerpunktmäßig zur Umweltpolitik.", "timestamp": 42.026131},
+        {"text": "Meine Name is Alix Weigel und ich bin seit März 2022 wissenschaftliche Mitarbeiterin am Lehrgebiet für Politikfeldanalyse und Umweltpolitik und bin dort im Projekt Circular Cities tätig.", "timestamp": 48.215163},
+        {"text": "In diesem Video stellen wir Ihnen ein Projekt vor, das wir aktuell zusammen mit dem Wuppertal-Institut durchführen.", "timestamp": 61.427195},
+        {"text": "Es geht dabei um die Abfallvermeidungspolitiken von 22 kreisfreien Städten in Norden-Westfalen.", "timestamp": 69.060429},
+        {"text": "Und das ist eben das Projekt Circular Cities.", "timestamp": 75.075176},
+        {"text": "AW: Erzähl dock mal, wie seid ihr auf dieses Projekt gekommen?", "timestamp": 78.117768},
+        {"text": "AEM: Ja, da muss ich ja ein wenig ausholen.", "timestamp": 81.358322},
+        {"text": "Am Beginn der Überlegungen standen drein Beobachtungen.", "timestamp": 84.280115},
+        {"text": "Erstens: wir haben inzwischen eine große Vielzahl an gesetzlichen, auch untergesetzlichen Regelungen in der Umweltpolitik, also zum Umweltschutz.", "timestamp": 88.738666},
+        {"text": "Das meiste davon stammt inzwischen aus dem europäischen Recht, aus EU-Richtlinien und die werden dann in Bundesrecht umgesetzt, und die Länder sind denn dafür verantwortlich, dass das Ganze auch vollzogen wird.", "timestamp": 99.655064},
+        {"text": "Dreh- und Angelpunkt sind aber am Ende die Kommunen, denn dort wird das Umweltrecht angewendet oder eben nicht angewendet.", "timestamp": 112.389829},
+        {"text": "Wir sehen das zum Beispiel im Bereich der Luftreinhaltung, bei der Klimaanpassung oder auch in der Kreislaufwirtschaft.", "timestamp": 120.59785},
+        {"text": "Den Kommunen fehlen zum Teil die Ressourcen und mitunter auch der politische Wille.", "timestamp": 126.851821},
+        {"text": "Und das führt dazu, dass Luftqualitätswerte zum Beispiel nicht eingehalten werden, Bioabfall nicht getrennt gesammelt und verwertet wird und so weiter.", "timestamp": 132.142487},
+        {"text": "Wenn man also wissen will, was wirklich passiert in der Umweltpolitik, muss man in den Kommunen nachsehen.", "timestamp": 141.149529},
+        {"text": "Der zweite Punkt bezieht sich auf die Kreislaufwirtschaft.", "timestamp": 146.561705},
+        {"text": "In der Kreislaufwirtschaftspolitik — früher sprach man noch von Abfallpolitik—, steht theoretisch schon seit Mitte der 1990er Jahre, die Abfallvermeidung ganz oben in der sogenannten Abfallpyramide.", "timestamp": 151.427829},
+        {"text": "Das bedeutet, man muss zuerst alles tun, damit Dinge überhaupt gar nicht zu Abfall werden.", "timestamp": 163.862984},
+        {"text": "Danach erst geht es um Recycling und erst dann werden die Dinge, die man nicht recyceln oder verwerten kann, die werden entsorgt und eben meistens verbrannt.", "timestamp": 169.740992},
+        {"text": "In Deutschland sind wir mit dem Sortieren und dem Recyceln richtig gut, vor allem technisch.", "timestamp": 180.426567},
+        {"text": "Aber das Vermeidungsgebot, das stand lange nur auf dem Papier.", "timestamp": 188.008165},
+        {"text": "AW: Warum wurde das Vermeidungsgebot denn nicht umgesetzt?", "timestamp": 191.739455},
+        {"text": "AEM: Ja, dafür gibt es eigentlich zwei Gründe: Zum einen, weil es für die Vermeidung im Wesentlichen keine technische Lösung gibt, sondern man muss Lebens- und Konsumgewohnheiten der Menschen ändern.", "timestamp": 195.340619},
+        {"text": "Damit tut sich die Politik schwer, denn zum einen hat man noch keine geeigneten Instrumente gefunden und zum anderen traut man sich auch nicht so richtig den Leuten vorzuschreiben, wie sie leben sollen.", "timestamp": 207.152244},
+        {"text": "Und dann is Abfall ja auch ein wichtiges Wirtschaftsgut.", "timestamp": 217.193705},
+        {"text": "Das heißt, viele haben gar keinen Anreiz, Abfall zu vermeiden.", "timestamp": 220.448996},
+        {"text": "Der dritte Punkt is, die dritte Beobachtung ist, dass in den letzten zwei Jahren doch Bewegung in die Sache mit der Abfallvermeidung gekommen ist.", "timestamp": 224.724459},
+        {"text": "2020 wurde das Kreislaufwirtschaftsgesetz überarbeitet und dabei an vielen Stellen die Pflicht der unter anderem der Kommunen zur Abfallvermeidung konkretisiert und gestärkt.", "timestamp": 234.401055},
+        {"text": "Im selben Jahr legte die EU-Kommission den New Circular Economy Action Plan vor, der unter anderem eine Halbierung des Restabfalls bis 2030 vorsieht.", "timestamp": 245.340356},
+        {"text": "Das kann man ohne Vermeidung gar nicht schaffen.", "timestamp": 256.067205},
+        {"text": "2012 wurde auch basierend auf europäischen Vorgaben verschiedene Einwegprodukte aus Plastik verboten also die berühmten Strohhalme, Watte, Stäbchen, Besteck und so, und ab 2023 sind Mehrwegverpackungen für To-go-Lebensmittel und Getränke verpflichtend.", "timestamp": 258.945899},
+        {"text": "Es tut sich also was.", "timestamp": 276.474776},
+        {"text": "Und deswegen haben wir, Henning Wills von Wuppertal-Institut und ich gesagt, wir wollen jetzt mal sehen, was davon auch in den Kommunen ankommt.", "timestamp": 277.983671},
+        {"text": "AW: Dass das Projekt sich die Kommunen in Nordrein-Westfalen anschaut, leuchtet mir ein.", "timestamp": 285.942971},
+        {"text": "Aber warum denn nur die kreisfreien Städte?", "timestamp": 293.415018}
+    ]
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Insert Dorit Funke audio
+            cur.execute("""
+                INSERT INTO media_items (id, title, description, media_type, media_url, duration_seconds, learning_unit)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    media_url = EXCLUDED.media_url,
+                    duration_seconds = EXCLUDED.duration_seconds,
+                    learning_unit = EXCLUDED.learning_unit,
+                    updated_at = NOW()
+            """, (
+                'dorit-funke-interview',
+                'Interview mit Prof. Dorit Funke',
+                'Prof. Dorit Funke erklärt Mikrosoziologie und ihre Forschungsschwerpunkte',
+                'audio',
+                'https://firebasestorage.googleapis.com/v0/b/azaaenfelhom.firebasestorage.app/o/dorit-funke-interview.mp3?alt=media',
+                155,  # ~2:35
+                'LE_IV'
+            ))
+
+            # Insert Dorit Funke transcript
+            cur.execute("""
+                INSERT INTO media_transcripts (media_id, lines, language)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (media_id, language)
+                DO UPDATE SET lines = EXCLUDED.lines
+            """, ('dorit-funke-interview', json.dumps(dorit_funke_transcript), 'de'))
+
+            # Insert Circular Cities video
+            cur.execute("""
+                INSERT INTO media_items (id, title, description, media_type, media_url, duration_seconds, learning_unit)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    media_url = EXCLUDED.media_url,
+                    duration_seconds = EXCLUDED.duration_seconds,
+                    learning_unit = EXCLUDED.learning_unit,
+                    updated_at = NOW()
+            """, (
+                'circular-cities-nrw',
+                'Circular Cities NRW',
+                'Projekt zur Abfallvermeidungspolitik in nordrhein-westfälischen Städten',
+                'video',
+                'https://firebasestorage.googleapis.com/v0/b/azaaenfelhom.firebasestorage.app/o/circular-cities-fixed.mp4?alt=media&token=24fd0376-3e1f-4743-9b1e-78489fc3c1bc',
+                785,  # ~13:05
+                'LE_IV'
+            ))
+
+            # Insert Circular Cities transcript
+            cur.execute("""
+                INSERT INTO media_transcripts (media_id, lines, language)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (media_id, language)
+                DO UPDATE SET lines = EXCLUDED.lines
+            """, ('circular-cities-nrw', json.dumps(circular_cities_transcript), 'de'))
+
+            conn.commit()
+
+    return jsonify({
+        "success": True,
+        "message": "Media items and transcripts seeded",
+        "items": [
+            {"id": "dorit-funke-interview", "type": "audio"},
+            {"id": "circular-cities-nrw", "type": "video"}
+        ]
+    })
+
+
 @app.route("/api/admin/seed-task-pages", methods=["POST"])
 def admin_seed_task_pages():
     """Seed sample task pages and task_reference cards (staging only)."""
@@ -2187,6 +2387,255 @@ def api_feed_visibility(item_id):
 
             conn.commit()
             return jsonify({"success": True, "action": action})
+
+
+# ==========================================================
+# MEDIA API - Audio/Video with synchronized transcripts
+# ==========================================================
+
+@app.route("/api/media")
+def api_media():
+    """Get list of media items.
+
+    Query params:
+    - media_type: Filter by 'audio' or 'video'
+    - learning_unit: Filter by learning unit
+    - course: Filter by course slug
+    """
+    media_type = request.args.get("media_type")
+    learning_unit = request.args.get("learning_unit")
+    course_slug = request.args.get("course")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            query = """
+                SELECT m.id, m.created_at, m.updated_at, m.title, m.description,
+                       m.media_type, m.media_url, m.duration_seconds, m.thumbnail_url,
+                       m.learning_unit, c.slug as course_slug, m.tags
+                FROM media_items m
+                LEFT JOIN courses c ON m.course_id = c.id
+                WHERE 1=1
+            """
+            params = []
+
+            if media_type:
+                query += " AND m.media_type = %s"
+                params.append(media_type)
+
+            if learning_unit:
+                query += " AND m.learning_unit = %s"
+                params.append(learning_unit)
+
+            if course_slug:
+                query += " AND c.slug = %s"
+                params.append(course_slug)
+
+            query += " ORDER BY m.created_at DESC"
+
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+            media_items = []
+            for row in rows:
+                duration_seconds = row[7]
+                duration_formatted = None
+                if duration_seconds:
+                    mins = duration_seconds // 60
+                    secs = duration_seconds % 60
+                    duration_formatted = f"{mins}:{secs:02d}"
+
+                media_items.append({
+                    "id": row[0],
+                    "created_at": row[1].isoformat() if row[1] else None,
+                    "updated_at": row[2].isoformat() if row[2] else None,
+                    "title": row[3],
+                    "description": row[4],
+                    "media_type": row[5],
+                    "media_url": row[6],
+                    "duration_seconds": duration_seconds,
+                    "duration_formatted": duration_formatted,
+                    "thumbnail_url": row[8],
+                    "learning_unit": row[9],
+                    "course_slug": row[10],
+                    "tags": row[11] or []
+                })
+
+            return jsonify({
+                "media_items": media_items,
+                "count": len(media_items)
+            })
+
+
+@app.route("/api/media/<media_id>")
+def api_media_item(media_id):
+    """Get a single media item by ID."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT m.id, m.created_at, m.updated_at, m.title, m.description,
+                       m.media_type, m.media_url, m.duration_seconds, m.thumbnail_url,
+                       m.learning_unit, c.slug as course_slug, m.tags
+                FROM media_items m
+                LEFT JOIN courses c ON m.course_id = c.id
+                WHERE m.id = %s
+            """, (media_id,))
+            row = cur.fetchone()
+
+            if not row:
+                return jsonify({"error": "Media item not found"}), 404
+
+            duration_seconds = row[7]
+            duration_formatted = None
+            if duration_seconds:
+                mins = duration_seconds // 60
+                secs = duration_seconds % 60
+                duration_formatted = f"{mins}:{secs:02d}"
+
+            return jsonify({
+                "id": row[0],
+                "created_at": row[1].isoformat() if row[1] else None,
+                "updated_at": row[2].isoformat() if row[2] else None,
+                "title": row[3],
+                "description": row[4],
+                "media_type": row[5],
+                "media_url": row[6],
+                "duration_seconds": duration_seconds,
+                "duration_formatted": duration_formatted,
+                "thumbnail_url": row[8],
+                "learning_unit": row[9],
+                "course_slug": row[10],
+                "tags": row[11] or []
+            })
+
+
+@app.route("/api/media/<media_id>/transcript")
+def api_media_transcript(media_id):
+    """Get transcript for a media item."""
+    language = request.args.get("language", "de")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify media item exists
+            cur.execute("SELECT id FROM media_items WHERE id = %s", (media_id,))
+            if not cur.fetchone():
+                return jsonify({"error": "Media item not found"}), 404
+
+            cur.execute("""
+                SELECT lines, language
+                FROM media_transcripts
+                WHERE media_id = %s AND language = %s
+            """, (media_id, language))
+            row = cur.fetchone()
+
+            if not row:
+                return jsonify({"error": "Transcript not found"}), 404
+
+            return jsonify({
+                "media_id": media_id,
+                "lines": row[0],
+                "language": row[1]
+            })
+
+
+@app.route("/api/media", methods=["POST"])
+def api_media_create():
+    """Create a new media item with optional transcript.
+
+    Body:
+    - id (required): Unique identifier
+    - title (required): Media title
+    - media_type (required): 'audio' or 'video'
+    - media_url (required): URL to media file
+    - description: Brief description
+    - duration_seconds: Duration in seconds
+    - thumbnail_url: URL to thumbnail image
+    - learning_unit: Learning unit reference
+    - course_slug: Course identifier
+    - tags: Array of tags
+    - transcript: Object with { lines: [...], language: 'de' }
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    # Required fields
+    media_id = data.get("id")
+    title = data.get("title")
+    media_type = data.get("media_type")
+    media_url = data.get("media_url")
+
+    if not media_id or not title or not media_type or not media_url:
+        return jsonify({"error": "Missing required fields: id, title, media_type, media_url"}), 400
+
+    if media_type not in ["audio", "video"]:
+        return jsonify({"error": "media_type must be 'audio' or 'video'"}), 400
+
+    # Optional fields
+    description = data.get("description")
+    duration_seconds = data.get("duration_seconds")
+    thumbnail_url = data.get("thumbnail_url")
+    learning_unit = data.get("learning_unit")
+    course_slug = data.get("course_slug")
+    tags = data.get("tags", [])
+    transcript = data.get("transcript")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Get course_id if slug provided
+            course_id = None
+            if course_slug:
+                cur.execute("SELECT id FROM courses WHERE slug = %s", (course_slug,))
+                result = cur.fetchone()
+                if result:
+                    course_id = result[0]
+
+            # Check if media item already exists
+            cur.execute("SELECT id FROM media_items WHERE id = %s", (media_id,))
+            existing = cur.fetchone()
+
+            if existing:
+                # Update existing
+                cur.execute("""
+                    UPDATE media_items
+                    SET title = %s, description = %s, media_type = %s, media_url = %s,
+                        duration_seconds = %s, thumbnail_url = %s, learning_unit = %s,
+                        course_id = %s, tags = %s, updated_at = NOW()
+                    WHERE id = %s
+                """, (
+                    title, description, media_type, media_url, duration_seconds,
+                    thumbnail_url, learning_unit, course_id, tags or None, media_id
+                ))
+                action = "updated"
+            else:
+                # Create new
+                cur.execute("""
+                    INSERT INTO media_items
+                    (id, title, description, media_type, media_url, duration_seconds,
+                     thumbnail_url, learning_unit, course_id, tags)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    media_id, title, description, media_type, media_url, duration_seconds,
+                    thumbnail_url, learning_unit, course_id, tags or None
+                ))
+                action = "created"
+
+            # Save transcript if provided
+            if transcript and "lines" in transcript:
+                language = transcript.get("language", "de")
+                cur.execute("""
+                    INSERT INTO media_transcripts (media_id, lines, language)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (media_id, language)
+                    DO UPDATE SET lines = EXCLUDED.lines
+                """, (media_id, json.dumps(transcript["lines"]), language))
+
+            conn.commit()
+
+            return jsonify({
+                "success": True,
+                "action": action,
+                "media_item": {"id": media_id}
+            })
 
 
 # ==========================================================

@@ -1196,9 +1196,280 @@ export function feedApp() {
     };
 }
 
+/**
+ * Media App component for audio/video playback with synchronized transcripts
+ */
+export function mediaApp() {
+    return {
+        // View state
+        currentView: 'list',  // 'list' or 'player'
+
+        // List view state
+        mediaItems: [],
+        loading: true,
+        error: null,
+
+        // Player view state
+        selectedMedia: null,
+        transcript: null,
+        transcriptLines: [],
+        activeLineIndex: -1,
+
+        // Playback state
+        currentTime: 0,
+        duration: 0,
+        isPlaying: false,
+
+        // Scroll tracking
+        userIsScrolling: false,
+        scrollTimeout: null,
+
+        // Progress save debounce
+        progressSaveTimeout: null,
+
+        async init() {
+            await this.loadMediaItems();
+        },
+
+        async loadMediaItems() {
+            this.loading = true;
+            this.error = null;
+
+            try {
+                // Try to fetch from server
+                const response = await fetch('/api/media');
+                if (response.ok) {
+                    const data = await response.json();
+                    this.mediaItems = data.media_items || [];
+
+                    // Cache locally
+                    const plainItems = JSON.parse(JSON.stringify(this.mediaItems));
+                    await db.saveMediaItems(plainItems);
+                } else {
+                    // Fall back to cache
+                    this.mediaItems = await db.getAllMediaItems();
+                }
+            } catch (e) {
+                console.error('Failed to load media items:', e);
+                // Try cache
+                this.mediaItems = await db.getAllMediaItems();
+                if (this.mediaItems.length === 0) {
+                    this.error = 'Medien konnten nicht geladen werden';
+                }
+            } finally {
+                this.loading = false;
+            }
+        },
+
+        async selectMedia(mediaId) {
+            this.loading = true;
+            this.error = null;
+            this.transcript = null;
+            this.transcriptLines = [];
+            this.activeLineIndex = -1;
+            this.currentTime = 0;
+
+            try {
+                // Get media item
+                const item = this.mediaItems.find(m => m.id === mediaId);
+                if (!item) {
+                    throw new Error('Media item not found');
+                }
+                this.selectedMedia = item;
+
+                // Load transcript
+                const cachedTranscript = await db.getTranscript(mediaId);
+                if (cachedTranscript) {
+                    this.transcript = cachedTranscript;
+                    this.transcriptLines = cachedTranscript.lines || [];
+                } else {
+                    // Fetch from server
+                    const response = await fetch(`/api/media/${mediaId}/transcript`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        this.transcript = data;
+                        this.transcriptLines = data.lines || [];
+
+                        // Cache it
+                        await db.saveTranscript({
+                            media_id: mediaId,
+                            lines: data.lines,
+                            language: data.language
+                        });
+                    }
+                }
+
+                // Load saved progress
+                const savedPosition = await db.getMediaProgress(mediaId);
+                this.currentTime = savedPosition || 0;
+
+                this.currentView = 'player';
+                this.loading = false;
+
+                // Restore position after DOM updates
+                this.$nextTick(() => {
+                    const mediaEl = this.$refs.mediaElement;
+                    if (mediaEl && this.currentTime > 0) {
+                        mediaEl.currentTime = this.currentTime;
+                    }
+                });
+
+            } catch (e) {
+                console.error('Failed to load media:', e);
+                this.error = e.message;
+                this.loading = false;
+            }
+        },
+
+        backToList() {
+            // Save current progress before leaving
+            if (this.selectedMedia && this.currentTime > 0) {
+                db.saveMediaProgress(this.selectedMedia.id, this.currentTime);
+            }
+            this.currentView = 'list';
+            this.selectedMedia = null;
+            this.transcript = null;
+            this.transcriptLines = [];
+        },
+
+        // Media event handlers
+        onTimeUpdate(event) {
+            const mediaEl = event.target;
+            this.currentTime = mediaEl.currentTime;
+            this.duration = mediaEl.duration || 0;
+            this.isPlaying = !mediaEl.paused;
+
+            this.updateActiveTranscriptLine();
+
+            // Debounced progress save
+            clearTimeout(this.progressSaveTimeout);
+            this.progressSaveTimeout = setTimeout(() => {
+                if (this.selectedMedia) {
+                    db.saveMediaProgress(this.selectedMedia.id, this.currentTime);
+                }
+            }, 2000);
+        },
+
+        onPlay() {
+            this.isPlaying = true;
+        },
+
+        onPause() {
+            this.isPlaying = false;
+            // Save progress immediately on pause
+            if (this.selectedMedia) {
+                db.saveMediaProgress(this.selectedMedia.id, this.currentTime);
+            }
+        },
+
+        onEnded() {
+            this.isPlaying = false;
+            // Reset progress when finished
+            if (this.selectedMedia) {
+                db.saveMediaProgress(this.selectedMedia.id, 0);
+            }
+        },
+
+        onLoadedMetadata(event) {
+            const mediaEl = event.target;
+            this.duration = mediaEl.duration || 0;
+
+            // Restore saved position
+            if (this.currentTime > 0 && this.currentTime < this.duration) {
+                mediaEl.currentTime = this.currentTime;
+            }
+        },
+
+        // Transcript sync
+        updateActiveTranscriptLine() {
+            if (!this.transcriptLines.length) return;
+
+            let newActiveIndex = -1;
+            for (let i = 0; i < this.transcriptLines.length; i++) {
+                const timestamp = this.transcriptLines[i].timestamp;
+                if (timestamp !== null && timestamp <= this.currentTime) {
+                    newActiveIndex = i;
+                } else if (timestamp !== null && timestamp > this.currentTime) {
+                    break;
+                }
+            }
+
+            if (newActiveIndex !== this.activeLineIndex) {
+                this.activeLineIndex = newActiveIndex;
+
+                // Auto-scroll if user is not manually scrolling
+                if (!this.userIsScrolling && newActiveIndex >= 0) {
+                    this.$nextTick(() => {
+                        const activeEl = this.$refs.transcriptPanel?.querySelector('.active');
+                        if (activeEl) {
+                            activeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }
+                    });
+                }
+            }
+        },
+
+        seekToLine(index) {
+            const line = this.transcriptLines[index];
+            if (!line || line.timestamp === null) return;
+
+            const mediaEl = this.$refs.mediaElement;
+            if (!mediaEl) return;
+
+            mediaEl.currentTime = line.timestamp;
+            if (!this.isPlaying) {
+                mediaEl.play();
+            }
+        },
+
+        onTranscriptScroll() {
+            this.userIsScrolling = true;
+
+            clearTimeout(this.scrollTimeout);
+            this.scrollTimeout = setTimeout(() => {
+                this.userIsScrolling = false;
+            }, 3000);
+        },
+
+        // Helpers
+        formatTime(seconds) {
+            if (!seconds || isNaN(seconds)) return '0:00';
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        },
+
+        getMediaIcon(mediaType) {
+            if (mediaType === 'video') {
+                return `<svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                </svg>`;
+            }
+            return `<svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+            </svg>`;
+        },
+
+        getLearningUnitBadge(unit) {
+            if (!unit) return '';
+            const labels = {
+                'LE_I': 'LE I',
+                'LE_II': 'LE II',
+                'LE_III': 'LE III',
+                'LE_IV': 'LE IV',
+                'LE_V': 'LE V'
+            };
+            return labels[unit] || unit;
+        }
+    };
+}
+
 // Make components available globally for Alpine
 window.cardResponse = cardResponse;
 window.learningApp = learningApp;
 window.taskPageView = taskPageView;
 window.taskPagesList = taskPagesList;
 window.feedApp = feedApp;
+window.mediaApp = mediaApp;

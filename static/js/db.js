@@ -11,7 +11,7 @@
  */
 
 const DB_NAME = 'sociology-learning';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 let dbInstance = null;
 
@@ -107,6 +107,23 @@ export async function openDB() {
                     autoIncrement: true
                 });
                 pendingStore.createIndex('task_page_id', 'task_page_id', { unique: false });
+            }
+
+            // Media items store - cached media metadata (v4)
+            if (!db.objectStoreNames.contains('media_items')) {
+                const mediaStore = db.createObjectStore('media_items', { keyPath: 'id' });
+                mediaStore.createIndex('media_type', 'media_type', { unique: false });
+                mediaStore.createIndex('learning_unit', 'learning_unit', { unique: false });
+            }
+
+            // Media transcripts store - cached transcript data (v4)
+            if (!db.objectStoreNames.contains('media_transcripts')) {
+                db.createObjectStore('media_transcripts', { keyPath: 'media_id' });
+            }
+
+            // Media progress store - local playback position tracking (v4)
+            if (!db.objectStoreNames.contains('media_progress')) {
+                db.createObjectStore('media_progress', { keyPath: 'media_id' });
             }
         };
     });
@@ -1039,6 +1056,116 @@ export async function getPendingTaskUpdateCount() {
         const store = tx.objectStore('pending_task_updates');
         const request = store.count();
         request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+// =============================================================================
+// MEDIA OPERATIONS
+// =============================================================================
+
+/**
+ * Get all cached media items
+ */
+export async function getAllMediaItems() {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('media_items', 'readonly');
+        const store = tx.objectStore('media_items');
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Get a single media item by ID
+ */
+export async function getMediaItem(id) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('media_items', 'readonly');
+        const store = tx.objectStore('media_items');
+        const request = store.get(id);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Save multiple media items (from sync)
+ */
+export async function saveMediaItems(items) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('media_items', 'readwrite');
+        const store = tx.objectStore('media_items');
+
+        for (const item of items) {
+            store.put(item);
+        }
+
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+/**
+ * Get transcript for a media item
+ */
+export async function getTranscript(mediaId) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('media_transcripts', 'readonly');
+        const store = tx.objectStore('media_transcripts');
+        const request = store.get(mediaId);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Save transcript for a media item
+ */
+export async function saveTranscript(transcript) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('media_transcripts', 'readwrite');
+        const store = tx.objectStore('media_transcripts');
+        const request = store.put(transcript);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Get playback progress for a media item
+ */
+export async function getMediaProgress(mediaId) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('media_progress', 'readonly');
+        const store = tx.objectStore('media_progress');
+        const request = store.get(mediaId);
+        request.onsuccess = () => resolve(request.result?.position || 0);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Save playback progress for a media item
+ */
+export async function saveMediaProgress(mediaId, position) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('media_progress', 'readwrite');
+        const store = tx.objectStore('media_progress');
+        const request = store.put({
+            media_id: mediaId,
+            position,
+            updated_at: new Date().toISOString()
+        });
+        request.onsuccess = () => resolve();
         request.onerror = () => reject(request.error);
     });
 }
